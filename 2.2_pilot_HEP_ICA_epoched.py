@@ -61,7 +61,7 @@ prep_outputs = pd.DataFrame(columns=column_names)
 
 # For ICA to perform better we need a highpass filter 1 
 # THEN after ICA copy weights back to initiAL preprocessed data with filter .3
-prep_data_ica_filtered = prep_data.copy().filter(l_freq=1.0, h_freq=45)  # you can try and see lower lowpass (e.g. 0.1, 0.3,..)for heart artifacts but other components may get worse
+prep_data_ica_filtered = prep_data.copy().filter(l_freq=1.0, h_freq=100)  # you can try and see lower lowpass (e.g. 0.1, 0.3,..)for heart artifacts but other components may get worse
 
 # For epoching data for 1 sec to reject  bad epochs
 epoch_duration = 1.0  # Define the duration of each epoch in seconds
@@ -108,9 +108,13 @@ epochs_cleaned.set_channel_types(back_eeg__mapping)
 
 # %% 8.2.  DO ICA ON CLEANED EPOCHS
 
+# decide on component number for ICA
+good_channels = mne.pick_types(prep_data_ica_filtered.info, meg=False, eeg=True, exclude='bads')
+best_n_components = len(good_channels) - 1
+
 # Do ICA on the epochs we prepared
 ica = ICA(
-    n_components=27, 
+    n_components= best_n_components, 
     max_iter="auto", 
     method="infomax", 
     random_state=97,
@@ -122,24 +126,37 @@ ica
 # print explained vars for ICs
 explained_var_ratio = ica.get_explained_variance_ratio(epochs_cleaned)
 for channel_type, ratio in explained_var_ratio.items():
-    print(
-        f"Fraction of {channel_type} variance explained by all components: " f"{ratio}"
-    )
+    print(f"Fraction of {channel_type} variance explained by all components: " f"{ratio}")
 
 
 # plot ICs on the original data: From here use the original prep data!
-prep_data.load_data()
-ica.plot_sources(prep_data, show_scrollbars=False)
-ica.plot_components()
+# prep_data.load_data()
+# ica.plot_sources(prep_data, show_scrollbars=False)
+# ica.plot_components()
 
 
 # Automatically label components using the 'iclabel' method
-component_dict = label_components(inst=prep_data, ica=ica, method='iclabel')
-# component_labels gives the labels
+ic_labels = label_components(prep_data, ica, method='iclabel')
+component_labels = ic_labels['labels']
+predicted_probabilities = ic_labels['y_pred_proba']
 
 # Print the results
-print("Component Labels:", component_dict['labels'])
-print("Predicted Probabilities:", component_dict['y_pred_proba'])
+print("Predicted Probabilities:", ic_labels['y_pred_proba'])
+print("Component Labels:", ic_labels['labels'])
+
+# Check whether heart component was found 
+nr_heart_components = 0
+nr_blink_components = 0
+nr_muscle_components = 0
+
+for label in component_labels:
+    if label == 'heart beat':
+        nr_heart_components = nr_heart_components + 1
+    elif label == 'eye blink':
+        nr_heart_components = nr_blink_components + 1
+    elif label == 'muscle artifact':
+        nr_heart_components = nr_muscle_components + 1
+
 
 ### Change what follows with the correct var names 
 
@@ -159,9 +176,9 @@ print(f"Excluding these ICA components: {exclude_index}")
 prep_ica_data = prep_data.copy()
 ica.apply(prep_ica_data, exclude=exclude_index)
 
-# compare ica cleaned and before
-prep_data.plot()
-prep_ica_data.plot()
+# # compare ica cleaned and before
+# prep_data.plot()
+# prep_ica_data.plot()
 
 # Save the data, yay!
 ica_file_name = file_name.replace('_until_', '_')
