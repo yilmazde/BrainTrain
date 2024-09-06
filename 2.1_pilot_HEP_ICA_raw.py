@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -127,7 +128,22 @@ labels = ic_labels["labels"]
 exclude_index = [
     index for index, label in enumerate(labels) if label not in ["brain", "other"] and predicted_probabilities[index] > 0.50
 ]
-print(f"Excluding these ICA components: {exclude_index}")
+
+# # ADD: CORRELATION WITH ECG signal!!  find which ICs match the ECG pattern and exclude those too
+ecg_indices, ecg_scores = ica.find_bads_ecg(prep_data, method="correlation", threshold="auto")
+n_bads_ecg = len(ecg_indices)
+exclude_index.extend(ecg_indices)
+
+# Assign those bads ICs to ica.exclude
+ica.exclude = exclude_index
+print(f"We will exclude these ICA components: {exclude_index}")
+
+# Check whether heart component was found from the first ICA operation
+nr_heart_components = 0
+
+for label in component_labels:
+    if label == 'heart beat':
+        nr_heart_components = nr_heart_components + 1
 
 
 # Exclude the bad Components: Reconstruct the original data without noise components
@@ -138,6 +154,7 @@ ica.apply(prep_ica_data, exclude=exclude_index)
 # compare ica cleaned and before
 prep_data.plot()
 prep_ica_data.plot()
+
 
 # Save the data, yay!
 ica_file_name = file_name.replace('_until_', '_')
@@ -162,28 +179,54 @@ print("CSV file created successfully.")
 
 
 
+
+# %% Tried to do the CFA cleaning and managed: Important parts of what follows has been added above!
+
+
 # # ADD: CORRELATION WITH ECG signal!! 
 # # This is from the mne tutorial : https://mne.tools/stable/auto_tutorials/preprocessing/40_artifact_correction_ica.html#sphx-glr-auto-tutorials-preprocessing-40-artifact-correction-ica-py
 
-# ica.exclude = []
-# # find which ICs match the ECG pattern
-# ecg_indices, ecg_scores = ica.find_bads_ecg(raw, method="correlation", threshold="auto")
-# ica.exclude = ecg_indices
+raw = mne.io.read_raw('/Users/denizyilmaz/Desktop/BrainTrain/BrainTrain_EEG_data/BTSCZ022_V1_eyes-open.vhdr', preload=True)
 
-# # barplot of ICA component "ECG match" scores
-# ica.plot_scores(ecg_scores)
+# PRE-REQUISITES, ICA appplied on raw which has ECG channel!!! && ECG should be assigned as such 
 
-# # plot diagnostics
-# ica.plot_properties(raw, picks=ecg_indices)
+ica.exclude = []
+# find which ICs match the ECG pattern
+ecg_indices, ecg_scores = ica.find_bads_ecg(raw, method="correlation", threshold="auto")
+ica.exclude = ecg_indices
 
-# # plot ICs applied to raw data, with ECG matches highlighted
-# ica.plot_sources(raw, show_scrollbars=False)
+# barplot of ICA component "ECG match" scores
+ica.plot_scores(ecg_scores)
 
-# # plot ICs applied to the averaged ECG epochs, with ECG matches highlighted
-# ica.plot_sources(ecg_evoked)
+# plot diagnostics
+ica.plot_properties(raw, picks=ecg_indices)
+
+# plot ICs applied to raw data, with ECG matches highlighted
+ica.plot_sources(raw, show_scrollbars=False)
+
+# plot evoked 
+ecg_evoked = create_ecg_epochs(prep_data).average()
+ecg_evoked.apply_baseline(baseline=(None, -0.2))
+ecg_evoked.plot_joint()
+
+# plot ICs applied to the averaged ECG epochs, with ECG matches highlighted
+ica.plot_sources(ecg_evoked)
 
 
+# OLDUUUU !!!!!!!! 
 
+# Plot diagnostics....
+# barplot of ICA component "ECG match" scores
+ica.plot_scores(ecg_scores)
+# plot diagnostics
+ica.plot_properties(prep_data, picks=ecg_indices)
+# plot ICs applied to raw data, with ECG matches highlighted
+ica.plot_sources(prep_data, show_scrollbars=False)
+# plot ICs applied to the averaged ECG epochs, with ECG matches highlighted
+ecg_evoked = create_ecg_epochs(prep_data).average()
+ecg_evoked.apply_baseline(baseline=(None, -0.2))
+ecg_evoked.plot_joint()
+ica.plot_sources(ecg_evoked)
 
 
 
