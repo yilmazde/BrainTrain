@@ -231,6 +231,10 @@ print(noisy_data.bad_by_ransac)
 raw_resampled_line_reref_interp.info["bads"] = noisy_data.get_bads()
 bads = noisy_data.get_bads() 
 rejected_electrode_nr = len(bads)
+# all bad in a string to record them in csv 
+interpolated_bads_str = ', '.join(bads)
+# calculate % bad electrodes
+# percent_rejected_electrode = (rejected_electrode_nr / total_electrode_nr) * 100
 
 # Interpolate noisy Channels
 raw_resampled_line_reref_interp.interpolate_bads()
@@ -245,7 +249,7 @@ high_freq = 45.0  # Upper cutoff frequency (in Hz)
 raw_resampled_line_reref_interp_filt.filter(l_freq=low_freq, h_freq=high_freq, method='fir', phase='zero') # check method and phase
 
 
-# E. SAVE the Preprocessed Data
+# %%  E. SAVE the Preprocessed Data
 
 # Replace 'filename' with the desired file name (without extension)
 filename = os.path.splitext(os.path.basename(raw.filenames[0]))[0]   # Specify the desired file name (without extension)
@@ -258,7 +262,19 @@ file_path = os.path.join(os.getcwd(), folder_name, filename + '_prep_until_ICA.f
 #raw_resampled_line_reref_interp_filt.save(file_path, overwrite=True)
 
 
+# Create a dictionary representing the new row
+new_row = pd.Series({'rejected_electrode_nr': rejected_electrode_nr,
+                     'rejected_chans': interpolated_bads_str
+                     })
+new_row =  new_row.to_frame().T
 
+prep_outputs = prep_outputs.combine_first(new_row)
+
+#### WORKS TILL HERE FIND A WAY TO CONCAT THEM INTO A DF !
+prep_outputs = pd.concat([prep_outputs, new_row], join='outer', ignore_index=True)
+
+# Print the DataFrame
+print(prep_outputs)
 
 # From here on, transfer to SCRIPT 2
  
