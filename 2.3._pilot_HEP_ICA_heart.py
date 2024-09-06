@@ -34,7 +34,7 @@ prep_dir = "/Users/denizyilmaz/Desktop/BrainTrain/BrainTrain_EEG_data/Preprocess
 os.chdir(prep_dir)
 
 # name of file
-file_name = 'BTSCZ022_V1_eyes-open_prep_until_ICA.fif'
+file_name = 'BTSCZ022_V1_hct_prep_until_ICA.fif'
 
 # construct the full file path
 file_path = os.path.join(prep_dir, file_name)
@@ -61,9 +61,9 @@ prep_heart_ica = prep_data.copy().filter(l_freq=1.0, h_freq=45)
 
 # Define Heartbeat Events
 heartbeat_events, event_id = mne.events_from_annotations(prep_heart_ica) # event_id defines what kind of an event it is
-# Extract only those that are heart-events, not from other annotations! DID NOT WORK, you need  event 1 as well!
-# ValueError: No matching events found for Comment/actiCAP Data On (event id 1)
-# heartbeat_events = heartbeat_events[heartbeat_events[:, 2] == event_id['R-peak']]
+# NEW: Extract only those that are heart-events, not from other annotations!
+heartbeat_events = heartbeat_events[heartbeat_events[:, 2] == event_id['R-peak']]
+heartbeat_event_id = event_id['R-peak']
 
 # Describe a  bad epoch
 reject_criteria = dict(eeg=1e-4)  #dict(eeg=100e-6)  # 100 µV, same as Antonin,(exclude chand that reflected eye movements, i.e.,Fp1, Fp2, F7, F8) 
@@ -80,11 +80,12 @@ prep_heart_ica.set_channel_types(temporary_eog_mapping)
 
 
 
+
 # Make heart epochs, you can already exclude bad epochs by adding reject argument!
 heartbeat_epochs = mne.Epochs(
     prep_heart_ica, heartbeat_events,
-    event_id=event_id, tmin=-0.3, tmax=0.8, 
-    baseline=(None, 0), preload=True,
+    event_id=heartbeat_event_id, tmin=-0.3, tmax=0.8, 
+    baseline=None, preload=True, # baseline should be None! see: https://mne.tools/stable/auto_tutorials/preprocessing/40_artifact_correction_ica.html
     reject=reject_criteria, flat = flat_criteria, 
     event_repeated='drop'
 )
