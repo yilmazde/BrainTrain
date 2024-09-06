@@ -37,7 +37,7 @@ pilot_dir = "/Users/denizyilmaz/Desktop/BrainTrain/BrainTrain_EEG_data"
 #pilot_dir = "/Users/denizyilmaz/Desktop/BrainTrain/pilot_analysis/BrainTrain_pilot_data_Michelle"
 os.chdir(pilot_dir)
 
-# %% 0. Import data
+# %% 1. Import data
 """
 .eeg: This file contains the actual EEG data. It's the raw EEG signal data you want to analyze.
 
@@ -67,17 +67,6 @@ MNE expects the unit of EEG signals to be V, so because your data is presumably 
 raw.apply_function(lambda x: x * 1e-6)
 https://mne.discourse.group/t/rescale-data-import-from-fieldtrip/3402
 """
-
-# %%  1. Initialize a DF to store all prep outcomes to be able to report them later and exclude participants
-
-# Define the column names for the DF
-column_names = ['subject_id', 'session', 'task', 
-                'total_electrode_nr', 'rejected_electrode_nr', 
-                'percent_rejected_electrode', 'rejected_chans']
-
-# Initialize an empty DF with columns
-prep_outputs = pd.DataFrame(columns=column_names)
-
 
 # %%  2. Get the relevant info of data
 
@@ -196,8 +185,6 @@ raw_eeg = raw_resampled.copy()
 # Remove the ECG channel
 raw_eeg.drop_channels(['ECG', 'RESP'])
 
-# define nr of eeg channels 
-total_electrode_nr = len(raw_eeg.ch_names)
 
 # %% 7. Preprocess the EEG data: DO NOT INCLUDE the ECG ND RESP channel here !!
 
@@ -229,13 +216,6 @@ noisy_data.find_bad_by_ransac(channel_wise=True, max_chunk_size=1)
 print(noisy_data.bad_by_ransac)
 # get channel names marked as bad and assign them into bads of the data from the step before
 raw_resampled_line_reref_interp.info["bads"] = noisy_data.get_bads()
-bads = noisy_data.get_bads() 
-rejected_electrode_nr = len(bads)
-# all bad in a string to record them in csv 
-interpolated_bads_str = ', '.join(bads)
-# calculate % bad electrodes
-# percent_rejected_electrode = (rejected_electrode_nr / total_electrode_nr) * 100
-
 # Interpolate noisy Channels
 raw_resampled_line_reref_interp.interpolate_bads()
 
@@ -249,7 +229,7 @@ high_freq = 45.0  # Upper cutoff frequency (in Hz)
 raw_resampled_line_reref_interp_filt.filter(l_freq=low_freq, h_freq=high_freq, method='fir', phase='zero') # check method and phase
 
 
-# %%  E. SAVE the Preprocessed Data
+# E. SAVE the Preprocessed Data
 
 # Replace 'filename' with the desired file name (without extension)
 filename = os.path.splitext(os.path.basename(raw.filenames[0]))[0]   # Specify the desired file name (without extension)
@@ -262,19 +242,7 @@ file_path = os.path.join(os.getcwd(), folder_name, filename + '_prep_until_ICA.f
 #raw_resampled_line_reref_interp_filt.save(file_path, overwrite=True)
 
 
-# Create a dictionary representing the new row
-new_row = pd.Series({'rejected_electrode_nr': rejected_electrode_nr,
-                     'rejected_chans': interpolated_bads_str
-                     })
-new_row =  new_row.to_frame().T
 
-prep_outputs = prep_outputs.combine_first(new_row)
-
-#### WORKS TILL HERE FIND A WAY TO CONCAT THEM INTO A DF !
-prep_outputs = pd.concat([prep_outputs, new_row], join='outer', ignore_index=True)
-
-# Print the DataFrame
-print(prep_outputs)
 
 # From here on, transfer to SCRIPT 2
  
@@ -427,7 +395,7 @@ https://mne.tools/mne-icalabel/stable/generated/examples/00_iclabel.html#sphx-gl
 baseline = (start_time, end_time)  # Define the baseline period
 epochs.apply_baseline(baseline=(start_time, end_time))
 
-# %% This is now in Script 3:  Creating ECG/HEP epochs: mne.preprocessing.create_ecg_epochs
+# %% Creating ECG/HEP epochs: mne.preprocessing.create_ecg_epochs
 
 heartbeat_events, event_id = mne.events_from_annotations(raw_resampled)
 
