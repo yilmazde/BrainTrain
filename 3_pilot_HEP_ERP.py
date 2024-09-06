@@ -4,13 +4,25 @@
 Created on Tue Mar 26 14:18:25 2024
 
 @author: denizyilmaz
+
+This script is loading preprocessed and ICA-cleaned data and calculating HEPs per session...
+Hopefully.
+
+# e.g. if u do manual rejection specify bad epochs
+# remove_epochs = [57, 63,64]
+# epochs.drop(remove_epochs)
 """
 
-# %%  0. Import Packages 
+# %%  0. Import Packages & Load Data
 
 import mne
 import os
 import numpy as np
+import pandas as pd
+from scipy import stats
+
+import matplotlib
+# matplotlib.use('TkAgg') 
 import matplotlib.pyplot as plt
 from mne.datasets import sample
 from mne.preprocessing import ICA, corrmap, create_ecg_epochs, create_eog_epochs, find_bad_channels_maxwell
@@ -21,84 +33,271 @@ from collections import Counter
 from pyprep.find_noisy_channels import NoisyChannels
 #from pyprep import PreprocessingPipeline
 
-
-import matplotlib
 # matplotlib.use('TkAgg')  # You can try different backends (Qt5Agg, TkAgg, etc.)
 
 # gives you info on whole packages in mne env
-mne.sys_info()
+# mne.sys_info()
 
 #  Dir where data preprocessed and ICA cleaned is stored
-prep_ica_dir = "/Users/denizyilmaz/Desktop/BrainTrain/BrainTrain_EEG_data/Preprocessed_ICA_applied"
+prep_ica_dir = "/Users/denizyilmaz/Desktop/BrainTrain/BrainTrain_EEG_data/Preprocessed_ICA_applied_on_raw"
 os.chdir(prep_ica_dir)
 
 # name of file
-prep_ica_file_name = 'BTSCZ022_V1_eyes-open_prep_ICA.fif'
+prep_ica_file_name_v1 = 'BTSCZ011_V1_eyes-closed_prep_ICA.fif'
+prep_ica_file_name_v3= 'BTSCZ011_V3_eyes-closed_prep_ICA.fif'
+
 
 # construct the full file path
-file_path = os.path.join(prep_ica_dir, prep_ica_file_name)
+file_path_v1 = os.path.join(prep_ica_dir, prep_ica_file_name_v1)
+file_path_v3 = os.path.join(prep_ica_dir, prep_ica_file_name_v3)
+
 
 # Load the FIF file
-prep_ica_data = mne.io.read_raw_fif(file_path, preload=True)
+prep_ica_data_v1 = mne.io.read_raw_fif(file_path_v1, preload=True)
+prep_ica_data_v3 = mne.io.read_raw_fif(file_path_v3, preload=True)
+
+# delete the unnecessary first annot: new segment
+
+prep_ica_data_v1.annotations.delete(0)
+prep_ica_data_v1.annotations.delete(0)
 
 
-# %% 1. Creating ECG/HEP epochs: mne.preprocessing.create_ecg_epochs
+prep_ica_data_v1.annotations
+prep_ica_data_v1.annotations.onset
+prep_ica_data_v1.annotations.duration
 
-heartbeat_events, event_id = mne.events_from_annotations(prep_ica_data)
 
-heartbeat_epochs = mne.Epochs(
-    prep_ica_data, heartbeat_events,
-    event_id=event_id, tmin=-0.3, tmax=0.8, 
-    baseline=(None, 0), preload=True, event_repeated='drop'
+prep_ica_data_v3.annotations.delete(0)
+prep_ica_data_v3.annotations.delete(0)
+
+
+prep_ica_data_v3.annotations
+prep_ica_data_v3.annotations.onset
+prep_ica_data_v3.annotations.duration
+
+"""
+# describe and plot
+prep_ica_data.describe()
+prep_ica_data.plot_sensors(show_names= True)
+prep_ica_data.plot_psd
+
+# inspect annotations
+prep_ica_data.annotations.description
+np.unique(prep_ica_data.annotations.description, return_counts=True)
+
+prep_ica_data.annotations
+prep_ica_data.annotations.onset
+prep_ica_data.annotations.duration
+"""
+
+
+
+# %% 1. Creating HEP evoked: mne.preprocessing.create_ecg_epochs
+
+### V1
+
+heartbeat_events_v1, event_id_v1 = mne.events_from_annotations(prep_ica_data_v1)
+
+baseline = (-0.2, -0.1)
+
+heartbeat_epochs_v1 = mne.Epochs(
+    prep_ica_data_v1, heartbeat_events_v1,
+    event_id=event_id_v1, tmin=-0.3, tmax=0.8, 
+    baseline=baseline, preload=True, event_repeated='drop'
 )
 
-heartbeat_evoked = heartbeat_epochs.average()
-heartbeat_evoked.plot()
+# plot epochs
+# heartbeat_epochs.plot(events = heartbeat_events, event_id=event_id)
 
-# %% 2. Comparison of Conditions : CHECK FROM HERE ON, you need to import V3 as well to compare!
+# drop bad epochs
+heartbeat_epochs_v1.drop_bad(reject=dict(eeg=150e-6))
 
-# Define time window of interest (e.g., 100-200 ms)
-tmin, tmax = 0.45, 0.5
 
-# Compute ERP for each condition
-condition_1_data = epochs_data['condition_1'].average()
-condition_2_data = epochs_data['condition_2'].average()
+# create evoked
+heartbeat_evoked_v1 = heartbeat_epochs_v1.average()
 
-# Select data within time window of interest
-time_mask = (condition_1_data.times >= tmin) & (condition_1_data.times <= tmax)
-condition_1_amplitudes = np.mean(condition_1_data.data[:, :, time_mask], axis=2)
-condition_2_amplitudes = np.mean(condition_2_data.data[:, :, time_mask], axis=2)
+# plot evoked
+# heartbeat_evoked.plot(gfp=True)
+heartbeat_evoked_v1.plot_joint().show()
+heartbeat_evoked_v1.plot()
+heartbeat_evoked_v1.plot(picks=['F4'])
+heartbeat_evoked_v1.plot(picks=['F8'])
+heartbeat_evoked_v1.plot(picks=['Fp2'])
+heartbeat_evoked_v1.plot(picks=['Pz'])
+heartbeat_evoked_v1.plot(picks=['T7'])
 
-# Perform statistical comparison (e.g., t-test)
-t_stat, p_value = stats.ttest_ind(condition_1_amplitudes, condition_2_amplitudes)
+### V3
 
-# Print results
-print("T-statistic:", t_stat)
-print("P-value:", p_value)
+heartbeat_events_v3, event_id_v3 = mne.events_from_annotations(prep_ica_data_v3)
 
-#### Plot HEPs
 
-# Plot ERP waveforms
+heartbeat_epochs_v3 = mne.Epochs(
+    prep_ica_data_v3, heartbeat_events_v3,
+    event_id=event_id_v3, tmin=-0.3, tmax=0.8, 
+    baseline=baseline, preload=True, event_repeated='drop'
+)
+
+# plot epochs
+# heartbeat_epochs.plot(events = heartbeat_events, event_id=event_id)
+
+# drop bad epochs
+heartbeat_epochs_v3.drop_bad(reject=dict(eeg=150e-6))
+
+
+# create evoked
+heartbeat_evoked_v3 = heartbeat_epochs_v3.average()
+
+# plot evoked
+# heartbeat_evoked.plot(gfp=True)
+heartbeat_evoked_v3.plot_joint()
+heartbeat_evoked_v3.plot()
+heartbeat_evoked_v3.plot(picks=['F4'])
+heartbeat_evoked_v3.plot(picks=['F8'])
+heartbeat_evoked_v3.plot(picks=['Fp2'])
+heartbeat_evoked_v3.plot(picks=['Pz'])
+heartbeat_evoked_v3.plot(picks=['T7'])
+
+# %% 2. Comparison of Conditions : Visualization
+
+# Organize the evoked objects into a dictionary
+evokeds = {
+    'V1': heartbeat_evoked_v1,
+    'V3': heartbeat_evoked_v3
+}
+
+
+# Plot comparison for the 'F4' electrode
+mne.viz.plot_compare_evokeds(evokeds, picks='F4')
+
+# difference plotted on topo
+hep_diff = mne.combine_evoked([heartbeat_evoked_v1, heartbeat_evoked_v3], weights=[1, -1])  # or -1, 1
+hep_diff.pick(picks="eeg").plot_topo(color="r")
+
+### Or plot with the time window highlighted ##### 
+##################################################
+
+
+# Plot comparison for the 'F4' electrode with highlighted time window
 plt.figure(figsize=(10, 6))
-plt.plot(condition_1_data.times, condition_1_data.data.mean(axis=0), color='blue', label='Condition 1')
-plt.plot(condition_2_data.times, condition_2_data.data.mean(axis=0), color='red', label='Condition 2')
+colors = {'V1': 'blue', 'V3': 'red'}  # Define colors for each condition
+for session, evoked in evokeds.items():
+    plt.plot(evoked.times, evoked.data[evoked.ch_names.index('F4'), :], color=colors[session], label=session)
 
 # Highlight time window of interest
+tmin, tmax = 0.45, 0.5
 plt.axvline(x=tmin, color='gray', linestyle='--', label='Time Window of Interest')
 plt.axvline(x=tmax, color='gray', linestyle='--')
 
 # Add labels, legend, and title
 plt.xlabel('Time (s)')
-plt.ylabel('Amplitude')
+plt.ylabel('Mean Amplitude (µV)')
 plt.legend()
-plt.title('ERP Waveforms for Conditions')
+plt.title('Comparison of ERP Waveforms Across Visits V1 and V3 for electrode F4 ')
+
+# Add axes lines for x=0 and y=0
+plt.axhline(y=0, color='black', linewidth=0.5)  # Horizontal line at y=0
+plt.axvline(x=0, color='black', linewidth=0.5)  # Vertical line at x=0
 
 # Show plot
 plt.show()
 
 
-# YAY WORKS UNTIL HERE !!!
+# %% 3.  Stats Comparison of Conditions 
 
+# Find the indices corresponding to the time window
+tmin, tmax = 0.45, 0.5
+
+# Select data within the time window of interest
+time_mask_v1 = (heartbeat_evoked_v1.times >= tmin) & (heartbeat_evoked_v1.times <= tmax)
+time_mask_v3 = (heartbeat_evoked_v3.times >= tmin) & (heartbeat_evoked_v3.times <= tmax)
+
+v1_amplitudes = heartbeat_evoked_v1.data[:, time_mask_v1]
+v3_amplitudes = heartbeat_evoked_v3.data[:, time_mask_v3]
+
+
+# Perform statistical comparison (e.g., t-test)
+t_stat, p_value = stats.ttest_ind(v1_amplitudes, v3_amplitudes)
+
+# Print results
+print("T-statistic:", t_stat)
+print("P-value:", p_value)
+
+# Check for significance
+if p_value < 0.05:
+    print("The difference between conditions is significant.")
+else:
+    print("There is no significant difference between conditions.")
+    
+### but now i have 13 values.... 13 time points? why.....
+
+# Check for significance
+if any(p_value < 0.05):
+    print("At least one electrode shows a significant difference between conditions.")
+else:
+    print("No electrode shows a significant difference between conditions.")
+
+
+###  delete this bit?? 
+
+# Assuming you're interested in a specific channel, e.g., 'F4'
+ch_idx_v1 = heartbeat_evoked_v1.ch_names.index('F4')
+ch_idx_v3 = heartbeat_evoked_v3.ch_names.index('F4')
+
+v1_amplitudes = np.mean(heartbeat_evoked_v1.data[ch_idx_v1, time_mask_v1])
+v3_amplitudes = np.mean(heartbeat_evoked_v3.data[ch_idx_v3, time_mask_v3])
+
+#  OR Select data within time window of interest
+v1_amplitudes = np.mean(heartbeat_evoked_v1.data[:, time_mask], axis=1)
+v3_amplitudes = np.mean(heartbeat_evoked_v3.data[:, time_mask], axis=1)
+
+######
+
+
+
+# VISUALIZE !! 
+
+# Let's focus on channel Pz and visualize both conditions in one plot:
+# bc we are interested in difference
+
+mne.viz.plot_compare_evokeds(dict(rare=rare, frequent=frequent), picks="Pz")
+
+# This shows a nice P300 for the rare condition. To improve this visualization further, we could add a 95% confidence interval around each evoked time course:
+mne.viz.plot_compare_evokeds(
+    dict(rare=list(epochs["x"].iter_evoked()), frequent=list(epochs["o"].iter_evoked())),
+    picks="Pz"
+)
+
+
+### Example to correlate HEP and beh
+
+# pip install pandas scipy statsmodels
+ 
+
+# Assuming 'heartbeat_evoked' is your MNE Evoked object
+# Let's say you are interested in a time window from 250 to 350 ms
+time_window = (0.25, 0.35)  # in seconds
+# Select the time indices for this range
+mask = (heartbeat_evoked.times >= time_window[0]) & (heartbeat_evoked.times <= time_window[1])
+
+# Extract data for all channels within this time window, then average across the time window
+# This gives you a single value per channel
+amplitude_data = heartbeat_evoked.data[:, mask].mean(axis=1)
+
+# Optionally, you might only want to focus on specific channels, e.g., 'Fz', 'Cz', 'Pz'
+# Find indices of the channels
+channel_indices = [heartbeat_evoked.ch_names.index(ch) for ch in ['Fz', 'Cz', 'Pz']]
+selected_amplitude_data = amplitude_data[channel_indices]
+
+# Create a DataFrame for analysis
+df = pd.DataFrame({
+    'Fz_amplitude': [selected_amplitude_data[0]],
+    'Cz_amplitude': [selected_amplitude_data[1]],
+    'Pz_amplitude': [selected_amplitude_data[2]],
+    'symptoms': [your_symptom_score]  # Make sure to replace `your_symptom_score` with actual data
+})
+
+
+##### ARCHIVE #####
 # OR from inbuilt function
 ecg_epochs = mne.preprocessing.create_ecg_epochs(raw_resampled, ch_name='ECG', tmin = -0.3, tmax = -)
 ecg_evoked = ecg_epochs.average()
