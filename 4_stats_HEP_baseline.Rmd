@@ -1,0 +1,1737 @@
+---
+title: "HEP_baseline_analysis"
+output: html_document
+date: "2024-08-22"
+---
+
+# Variables Overview: Bold => needs to be imported from other DFs
+
+Missing variables are *marked*
+
+Self-report/Behavioral Variables:
+- Control Variables: 
+age, gender, BMI, smoker, education_years, caffeine, heart rate knowledge, *chlorpromazine equivalent dose*, *clozapine dose*
+- ECG parameters: 
+HR, HRV (Root Mean Square of Successive Differences, RMSSD),  QT interval, QTc interval, Amplitude of R wave
+
+*Clinical variables*
+- Symptoms: Severity: 
+PANSS positive, PANSS negative, PANSS general psychopathology, PANSS total
+- Cognitive Impairments:
+BACS composite
+- General functioning: 
+FROGS total
+
+Patients' Data I need from other CSVs:
+BMI, education_years => these I added to the csv
+clozapine dose, chlorpromazine equivalent dose, PANSS, BACS, FROGS => these I will later retrieve for the correlation analyses
+
+# Import Data & Data Handling: General Steps
+
+- Exclude Bad Subjects
+  - Look over the logs to see who should be excluded. (esp. for task-wise exclusion)
+    - BT002 should be excluded from HCT and EEG analysis, but not from Questionnaires
+    - if HCT_counted_only_doy is 0 exclude those subs from HCT analysis
+  - excluded col is 1 for totally excluded subject
+- Verify Column/Data types
+- Dummy Variable creation & assign ref level
+- Missing Data: Impute behavioral vars with at least 90% data availability
+- Inspect Variable Distributions to see if everything looks normal
+- BACS Composite Cognition Scores calculation for SZ 
+
+# Steps
+
+Import libraries
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(readr)    # For reading CSV files
+library(dplyr)    # For data manipulation
+library(ggplot2)  # For plotting
+library(ppcor)    # For partial correlation
+library("psych")  # For partial correlation
+library(VIM)      # For KNN imputation
+library(caret)    # For dummy variables 
+library(BayesFactor)
+library(correlation)
+library(see)
+library(lme4)
+library(emmeans)
+library(apaTables)
+library(psych)  
+library(skimr)
+library(rstatix)
+library(see)
+library(patchwork)
+library(gtsummary)
+library(tidyr)
+library(gridExtra)
+library(patchwork)
+library(cowplot)
+library(RColorBrewer)
+library(lsr)
+library(emmeans)
+
+
+options(scipen=999)
+
+knitr::opts_knit$set(root.dir = "/Users/denizyilmaz/Desktop/BrainTrain")
+
+```
+
+Import and check data
+```{r data import & skim, include=FALSE}
+
+beh_data_hc <- read_csv("/Users/denizyilmaz/Desktop/BrainTrain/Behavioral_data_analysis/Data/BHC Healthy Controls Behavioral EEG - BHC_behavioural_data.csv")
+
+beh_data_sz <- read_csv("/Users/denizyilmaz/Desktop/BrainTrain/Behavioral_data_analysis/Data/Patients EEG Behavioral Data & Preprocessing Log & Data Checklist - BT_behavioral_data.csv")
+
+# Import the HEP data
+hep_data_hc <- read_csv("/Users/denizyilmaz/Desktop/BrainTrain/Healthy Controls_BHC/BrainTrain_EEG_data_HC/HEPs/HC_hep_outputs_new.csv")
+hep_data_sz <- read_csv("/Users/denizyilmaz/Desktop/BrainTrain/BrainTrain_EEG_data/HEPs/hep_outputs_new.csv")
+
+# Check data types using str()
+str(beh_data_hc)
+str(beh_data_sz)
+
+# skim the data
+skim(beh_data_hc) %>%
+  summary()
+
+skim(beh_data_sz) %>%
+  summary()
+
+
+```
+
+Import and check ECG covar data
+```{r}
+ecg_data_hc <- read_csv('/Users/denizyilmaz/Desktop/BrainTrain/Healthy Controls_BHC/BrainTrain_EEG_data_HC/ECG/ecg_outputs_HC.csv')
+
+ecg_data_hc$group <- "HC"
+  
+ecg_data_sz <- read_csv('/Users/denizyilmaz/Desktop/BrainTrain/BrainTrain_EEG_data/ECG/ecg_outputs_patients.csv')
+
+ecg_data_sz$group <- "SZ"
+
+# make subject_id compatible with the other data!
+ecg_data_sz$subject_id <- gsub("^BTSCZ", "BT", ecg_data_sz$subject_id)
+
+# merge
+ecg_data_merged <- rbind(ecg_data_hc, ecg_data_sz)
+
+# make compatible
+ecg_data_merged <- ecg_data_merged%>%
+  rename(subject = subject_id)
+
+# take baseline data
+ecg_data_merged_bl <- ecg_data_merged[is.na(ecg_data_merged$session) | ecg_data_merged$session == "V1", ]
+
+
+```
+
+
+
+Task 1: Make HC and SZ data compatible & Merge Datasets
+- Check Column Data Types
+- Exclude Bads
+- Rename/create cols if needed
+```{r mergeyy}
+
+# Assign the first row as column names bc the initial row was trash 
+colnames(beh_data_sz) <- beh_data_sz[1, ]
+# Remove the first row from the data frame
+beh_data_sz <- beh_data_sz[-1, ]
+
+# make the colnames equal
+beh_data_sz <- beh_data_sz %>%
+  rename(
+    sex = Gender,
+    age = Age
+  )
+
+beh_data_hc <- beh_data_hc %>%
+  rename(
+    education_years = "education_years(dont count breaks)",
+    CDS = `CDS (SUM ALL excluding 30)`
+  )
+
+# Convert height from cm to m
+beh_data_hc$height <- beh_data_hc$height / 100
+
+# Calculate BMI
+beh_data_hc$body_mass_index <- beh_data_hc$weight / (beh_data_hc$height^2)
+
+
+# Assuming your data frame is called 'df'
+beh_data_sz_bl <- beh_data_sz %>%
+  filter(Session == "V1")
+
+# excluded or screening failure subjects..
+# hc_excluded <- c("BHC008") 
+hc_excluded <- beh_data_hc$excluded == 1 # and everyone above after BHC013
+hc_excluded <- beh_data_hc$subject[hc_excluded]
+# sz_excluded <- c("BT001", "BT014", "BT016", "BT025", "BT027", "BT033", "BT034") # and everyone after 35
+sz_excluded <- beh_data_sz_bl$excluded == 1 
+sz_excluded <- beh_data_sz_bl$subject[sz_excluded]
+
+
+# Convert subject column to character if it's not already
+beh_data_hc$subject <- as.character(beh_data_hc$subject)
+beh_data_sz_bl$subject <- as.character(beh_data_sz_bl$subject)
+
+# Remove subjects listed in hc_excluded and sz_excluded
+ beh_data_hc <- beh_data_hc %>%
+  filter(!subject %in% hc_excluded) %>%
+  filter(!(subject > "BHC013"))
+ 
+beh_data_sz_bl <- beh_data_sz_bl %>%
+  filter(!subject %in% sz_excluded) %>%
+  filter(!(subject > "BT035"))
+
+# add group col
+beh_data_sz_bl$group <- "SZ"
+beh_data_hc$group <- "HC"
+
+
+# common columns
+common_columns <- intersect(names(beh_data_hc), names(beh_data_sz_bl))
+str(beh_data_sz_bl)
+str(beh_data_hc)
+
+# Automatically convert all possible numeric columns to numeric 
+# Identify columns that can be numeric, ignoring NA values
+numeric_cols <- sapply(beh_data_sz_bl, function(x) all(is.na(x) | !is.na((as.numeric(as.character(x))))))
+# numeric_cols <- sapply(beh_data_sz_bl, function(x) all(grepl("^[0-9.-]+$", x) | is.na(x)))
+# View which columns are detected as numeric-like
+numeric_cols
+# Convert only columns identified as numeric-like
+beh_data_sz_bl[numeric_cols] <- lapply(beh_data_sz_bl[numeric_cols], function(x) as.numeric(as.character(x)))
+# Check the structure after conversion
+str(beh_data_sz_bl)
+
+# Convert to POSIXlt time
+beh_data_hc$EEG_Time_Start <- strptime(beh_data_hc$EEG_Time_Start, format="%H:%M:%S")
+beh_data_hc$EEG_Time_End <- strptime(beh_data_hc$EEG_Time_End, format="%H:%M:%S")
+
+beh_data_sz_bl$EEG_Time_Start <- strptime(beh_data_sz_bl$EEG_Time_Start, format="%H:%M:%S")
+beh_data_sz_bl$EEG_Time_End <- strptime(beh_data_sz_bl$EEG_Time_End, format="%H:%M:%S")
+
+
+ # Concatenate the data frames vertically
+data <-  bind_rows(beh_data_sz_bl, beh_data_hc)
+ 
+
+
+```
+
+Do the same pimping for HEP Data
+```{r}
+##### DO THE SAME FOR THE HEP DATA
+
+# make sub names compatible
+hep_data_sz$subject_id <- gsub("^BTSCZ", "BT", hep_data_sz$subject_id )
+
+# add group col
+hep_data_sz$group <- "SZ"
+hep_data_hc$group <- "HC"
+
+# keep only BL for SZ
+hep_data_sz_bl <- hep_data_sz[hep_data_sz$session == "V1",]
+
+# merge
+hep_data <-  bind_rows(hep_data_sz_bl, hep_data_hc)
+
+# change subject_id col to subject
+# make compatible
+hep_data <- hep_data%>%
+  rename(subject = subject_id)
+```
+
+Merge ecg_data_merged_bl and data (which is the beh data) with
+```{r}
+
+# merge ecg and HEP data 
+common_cols_ecg_hep <- intersect(colnames(hep_data), colnames(ecg_data_merged_bl))
+hep_ecg_data <- full_join(hep_data, ecg_data_merged_bl, by = common_cols_ecg_hep)
+
+#merge also with data
+
+# Merge the datasets on the subject_id
+hep_ecg_beh_data <- merge(hep_ecg_data, data, by = c("subject", "group"))
+
+
+```
+
+
+Task 2:
+- Dummy Variable creation & assign ref level
+```{r dummiess}
+
+categorical_vars <- c("sex", "HCT_version", "smoker", "had_caffeine", "HCT_counted_body", "knows_heartrate", "group")
+
+# Convert specified columns to factors
+data <- data %>%
+  mutate(across(all_of(categorical_vars), as.factor))
+
+# check levels 
+factor_levels <- lapply(data[categorical_vars], levels)
+# Print factor levels
+print(factor_levels)
+# Looks good :)))
+
+### OR....
+# data$sex <- as.factor(data$sex)
+# data$sex <- relevel(data$sex, ref = "f")
+
+```
+
+Task 3:
+- Missing Data: Impute behavioral vars with at least 90% data availability
+```{r impute missing data }
+
+ # Calculate missing data proportions
+missing_proportions <- data %>%
+    summarise(across(everything(), ~ mean(is.na(.)) * 100, .names = "{col}"))
+
+# Convert missing_proportions to a tidy format
+missing_proportions_long <- missing_proportions %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "missing_proportion")
+
+# Filter columns where missing_proportion is between 0 and 10
+vars_to_impute <- missing_proportions_long %>%
+  filter(missing_proportion > 0 & missing_proportion < 10) %>%
+  pull(variable)
+
+# View the result
+print(vars_to_impute)
+
+# Perform KNN imputation
+data <- kNN(data, k = 5, variable = vars_to_impute)
+
+# Remove the suffix added by kNN function (it adds .imp to imputed variables)
+colnames(data) <- sub("\\.imp", "", colnames(data))
+
+```
+
+Task 4:
+- Create necessary variables:
+  e.g. MAIA_total, interoceptive_accuracy
+```{r}
+
+# Sum the specified MAIA columns to create MAIA_total
+data$MAIA_total <- rowSums(data[, c("MAIA_noticing", "MAIA_not_distracting", 
+                                    "MAIA_not_worrying", "MAIA_attention_regulation", 
+                                    "MAIA_emotional_awareness", "MAIA_self_regulation", 
+                                    "MAIA_body_listening", "MAIA_trusting")], na.rm = TRUE)
+  
+
+data$interoceptive_accuracy <- numeric(length(data$subject))
+
+# Loop through each subject
+for (i in 1:length(data$subject)) {
+  # Initialize a vector to store accuracies for each trial
+  accuracies <- numeric(9)  # Assuming there are 9 trials
+  
+  # Loop through each trial (1 to 9)
+  for (r in 1:9) {
+    # Calculate the accuracy for the r-th trial
+    observed_heartbeats <- data[[paste0("HCT_observed_t", r)]][i]
+    reported_heartbeats <- data[[paste0("HCT_reported_t", r)]][i]
+    
+    # Calculate the accuracy for this trial
+    accuracy <- 1 - abs(observed_heartbeats - reported_heartbeats) / observed_heartbeats
+    
+    # Store the accuracy
+    accuracies[r] <- accuracy
+  }
+  
+  # Calculate the IAcc score as the mean accuracy across all trials
+  data$interoceptive_accuracy[i] <- mean(accuracies, na.rm = TRUE)  # Use na.rm = TRUE to handle any missing data
+}
+
+
+  
+```
+
+
+Task 5: 
+- Inspect Descriptives/Distributions
+```{r}
+
+skim(data)
+
+descriptive_table <- data %>% 
+  get_summary_stats()
+
+data %>%
+  dplyr::group_by(group) %>%
+  skim()
+
+data %>%
+  count(group)
+data %>%
+  count(sex)
+
+
+# Create density plot for each group
+ggplot(data = data, aes(x = education_years, color = group, group = group)) +
+  geom_density() +
+  labs(title = "Density Plot of education_years per Group",
+       x = "education_years",
+       y = "Density",
+       color = "Group") +
+  theme_minimal()
+
+# Create density plot for each group
+ggplot(data = data, aes(x = body_mass_index, color = group, group = group)) +
+  geom_density() +
+  labs(title = "Density Plot of body_mass_index per Group",
+       x = "body_mass_index",
+       y = "Density",
+       color = "Group") +
+  theme_minimal()
+  
+# Create density plot for each group
+ggplot(data = data, aes(x = age, color = group, group = group)) +
+  geom_density() +
+  labs(title = "Density Plot of age per Group",
+       x = "age",
+       y = "Density",
+       color = "Group") +
+  theme_minimal()
+
+# Create density plot for each group
+ggplot(data = data, aes(x = BPQ_total, color = group, group = group)) +
+  geom_density() +
+  labs(title = "Density Plot of BPQ_total per Group",
+       x = "BPQ_total",
+       y = "Density",
+       color = "Group") +
+  theme_minimal()
+
+# Create density plot for each group
+ggplot(data = data, aes(x = interoceptive_accuracy, color = group, group = group)) +
+  geom_density() +
+  labs(title = "Density Plot of interoceptive_accuracy per Group",
+       x = "interoceptive_accuracy",
+       y = "Density",
+       color = "Group") +
+  theme_minimal()
+
+```
+
+
+
+# Hypothesis Testing
+
+## 1) We hypothesize that individuals with SSD will show altered interoception on three levels compared to healthy controls (HC):   
+
+
+
+### 1.1) Interoceptive sensibility differences will be observed and measured by interoception questionnaires MAIA BPQ. The CDS will capture further differences in bodily self-consciousness. (Non-directional hypothesis)
+
+We will build a regression model for each hypothesis, where the variables of interest (Interoceptive Sensibility and Interoceptive Accuracy data) will be the dependent variable and the diagnostic group (HC vs. SSD) will be the predictor, along with the covariates of age, gender, BMI, and years of education.
+
+
+```{r define questionnaire_vars}
+questionnaire_vars <- c("BPQ_total", "BPQ_body_awareness", "BPQ_autonomic", "BPQ_sub_diaphragmatic", "BPQ_supra_diaphragmatic","MAIA_noticing", "MAIA_not_distracting", "MAIA_not_worrying", "MAIA_attention_regulation",         "MAIA_emotional_awareness", "MAIA_self_regulation","MAIA_body_listening", "MAIA_trusting", "MAIA_total", "CDS")
+
+BPQ_vars <- c("BPQ_total", "BPQ_body_awareness", "BPQ_autonomic", "BPQ_sub_diaphragmatic", "BPQ_supra_diaphragmatic")
+
+MAIA_vars <- c("MAIA_noticing", "MAIA_not_distracting", "MAIA_not_worrying", "MAIA_attention_regulation", "MAIA_emotional_awareness", "MAIA_self_regulation","MAIA_body_listening", "MAIA_trusting", "MAIA_total")
+
+```
+
+TEST
+```{r lm BPQ_total }
+
+# compute LMM and save statistics of main effect as data frame
+lm_result <- lm(BPQ_total ~ group +age + sex + education_years + body_mass_index, 
+               data=data,
+               na.action=na.omit)
+
+
+# get the model fits:  AIC (Akaike Information Criterion), or BIC (Bayesian Information Criterion)
+#AIC(lm_result)
+#BIC(lm_result)
+
+# Get the summary of the model to extract the coefficients
+summary_lm <- summary(lm_result)
+print(summary_lm)
+# Extract coefficients, standard errors, t-values, and p-values
+coefficients <- summary_lm$coefficients
+# View the structure of coefficients to understand its layout
+str(coefficients)
+# Print the coefficients and their significance
+print(coefficients)
+
+# anova() Computes analysis of variance (or deviance) tables for one or more fitted model objects.
+anova_table <- anova(lm_result)
+
+# Add predictor and outcome columns
+anova_table$predictor <- rownames(anova_table)
+rownames(anova_table) <- NULL # now we have a col for predictors, dont need the rownames
+anova_table$outcome <- rep("brainage", times = nrow(anova_table))
+# df_den
+n <- nobs(lm_result)
+k <- length(levels(data$group))
+df_den = n - k
+anova_table$df_den <- df_den
+
+# Rename the columns appropriately
+colnames(anova_table) = c("df_num","sum_sq","mean_sq","f","p","predictor","outcome", "df_den")
+
+# Reorder the columns
+anova_table = anova_table[,c("outcome","predictor","sum_sq","mean_sq","df_num","df_den","f","p")]
+
+# Format p-values to avoid scientific notation
+anova_table$p <- format(anova_table$p, scientific = FALSE, digits = 3)
+# Format p-values to exactly three digits after the decimal point
+# anova_table$p <- sprintf("%.3f", as.numeric(anova_table$p))
+```
+
+HERE how to correct p? Per hypothesis (questionnaire) or per test (covariate)?
+All questionnaires
+```{r lm for loop. including all quesionnaires}
+
+# Initialize a list to store the results
+combined_results <- list()
+
+for (var in questionnaire_vars) {
+  
+  lm_result <- lm(as.formula(paste(var, "~ group + age + sex + education_years + body_mass_index")), 
+                  data = data,
+                  na.action = na.omit)
+  
+  # Get ANOVA table
+  anova_table <- anova(lm_result)
+  
+  # Add predictor and outcome columns
+  anova_table$predictor <- rownames(anova_table)
+  rownames(anova_table) <- NULL
+  anova_table$outcome <- rep(var, times = nrow(anova_table))
+  
+  # Calculate df_den
+  n <- nobs(lm_result)
+  k <- length(levels(data$group))
+  df_den <- n - k
+  anova_table$df_den <- df_den
+  
+  # Rename columns
+  colnames(anova_table) <- c("df_num","sum_sq","mean_sq","f","p","predictor","outcome","df_den")
+  
+  # Reorder the columns
+  anova_table <- anova_table[,c("outcome","predictor","sum_sq","mean_sq","df_num","df_den","f","p")]
+  
+   # Extract coefficients from the linear model
+  summary_lm <- summary(lm_result)
+  coefficients <- summary_lm$coefficients
+  
+  # Convert coefficients to a data frame
+  coef_df <- as.data.frame(coefficients)
+  
+  # Add predictor and outcome columns to the coefficients data frame
+  coef_df$predictor <- rownames(coef_df)
+  rownames(coef_df) <- NULL
+  coef_df$outcome <- rep(var, times = nrow(coef_df))
+  
+  # Rename coefficient columns for clarity
+  colnames(coef_df) <- c("estimate", "std_error", "t_value", "p_value", "predictor", "outcome")
+  
+  # Merge the ANOVA and coefficient tables on the predictor variable
+  combined_table <- merge(anova_table, coef_df, by = c("outcome", "predictor"), all = TRUE)
+  
+  # Store the combined results in the list
+  combined_results[[var]] <- combined_table
+  
+}
+
+# Combine all results into one dataframe
+anova_results_df_questionnaires <- do.call(rbind, combined_results)
+
+# Correct for multiple comparisons using the Benjamini-Hochberg procedure
+anova_results_df_questionnaires$p_adjusted <- p.adjust(anova_results_df_questionnaires$p, method = "BH") # add n_length!! https://stackoverflow.com/questions/30108510/p-adjust-with-n-than-number-of-tests
+
+# Format p-values to avoid scientific notation
+anova_results_df_questionnaires$p_adjusted <- format(anova_results_df_questionnaires$p_adjusted, scientific = FALSE, digits = 3)
+
+# View the results
+print(anova_results_df_questionnaires)
+
+# SAVE !!!
+# write.csv(anova_results_df_questionnaires, file = "/Users/denizyilmaz/Desktop/BrainTrain/Results/anova_lm_results_questionnaires.csv", row.names = FALSE)
+
+
+```
+All BPQs: THE CORRECTED FOR ALL TESTS spit out all same adjusted p-values...
+```{r lm for loop: BPQs}
+
+# Initialize a list to store the results
+combined_results_bpq <- list()
+
+for (var in BPQ_vars) {
+  
+  lm_result <- lm(as.formula(paste(var, "~ group + age + sex + education_years + body_mass_index")), 
+                  data = data,
+                  na.action = na.omit)
+  
+  # Get ANOVA table
+  anova_table <- anova(lm_result)
+  
+  # Add predictor and outcome columns
+  anova_table$predictor <- rownames(anova_table)
+  rownames(anova_table) <- NULL
+  anova_table$outcome <- rep(var, times = nrow(anova_table))
+  
+  # Calculate df_den
+  n <- nobs(lm_result)
+  k <- length(levels(data$group))
+  df_den <- n - k
+  anova_table$df_den <- df_den
+  
+  # Rename columns
+  colnames(anova_table) <- c("df_num","sum_sq","mean_sq","f","p","predictor","outcome","df_den")
+  
+  # Reorder the columns
+  anova_table <- anova_table[,c("outcome","predictor","sum_sq","mean_sq","df_num","df_den","f","p")]
+  
+   # Extract coefficients from the linear model
+  summary_lm <- summary(lm_result)
+  coefficients <- summary_lm$coefficients
+  
+  # Convert coefficients to a data frame
+  coef_df <- as.data.frame(coefficients)
+  
+  # Add predictor and outcome columns to the coefficients data frame
+  coef_df$predictor <- rownames(coef_df)
+  rownames(coef_df) <- NULL
+  coef_df$outcome <- rep(var, times = nrow(coef_df))
+  
+  # Rename coefficient columns for clarity
+  colnames(coef_df) <- c("estimate", "std_error", "t_value", "p_value", "predictor", "outcome")
+  
+  # Merge the ANOVA and coefficient tables on the predictor variable
+  combined_table <- merge(anova_table, coef_df, by = c("outcome", "predictor"), all = TRUE)
+  
+  # Store the combined results in the list
+  combined_results_bpq[[var]] <- combined_table
+  
+}
+
+# Combine all results into one dataframe
+anova_results_df_bpq_questionnaires <- do.call(rbind, combined_results_bpq)
+anova_results_df_bpq_questionnaires_adjusted_for_all_covars <- anova_results_df_bpq_questionnaires
+
+# get only results of interest
+# Filter the results where the predictor is either "group" or "groupSZ"
+bpq_results_of_interest <- anova_results_df_bpq_questionnaires[
+  anova_results_df_bpq_questionnaires$predictor %in% c("group", "groupSZ"), 
+]
+
+# Correct for multiple comparisons using the Benjamini-Hochberg procedure
+bpq_results_of_interest$p_adjusted <- p.adjust(bpq_results_of_interest$p, method = "BH",  n = length(BPQ_vars)) #  n = length(BPQ_vars)  
+# https://stackoverflow.com/questions/30108510/p-adjust-with-n-than-number-of-tests
+# https://stats.stackexchange.com/questions/417234/how-to-correct-p-values-of-two-multiple-regression-models
+anova_results_df_bpq_questionnaires_adjusted_for_all_covars$p_adjusted <- p.adjust(anova_results_df_bpq_questionnaires_adjusted_for_all_covars$p, method = "BH")
+
+# Format p-values to avoid scientific notation
+bpq_results_of_interest$p_adjusted <- format(bpq_results_of_interest$p_adjusted, scientific = FALSE) # ,  digits = 3
+anova_results_df_bpq_questionnaires_adjusted_for_all_covars$p_adjusted <- format(anova_results_df_bpq_questionnaires_adjusted_for_all_covars$p_adjusted, scientific = FALSE)  # , digits = 3
+
+# View the results
+print(bpq_results_of_interest)
+
+# SAVE !!!
+write.csv(anova_results_df_bpq_questionnaires_adjusted_for_all_covars, file = "/Users/denizyilmaz/Desktop/BrainTrain/Results/anova_lm_results_BPQ_questionnaires_p-adjusted_for_all_covars.csv", row.names = FALSE)
+
+write.csv(bpq_results_of_interest, file = "/Users/denizyilmaz/Desktop/BrainTrain/Results/anova_lm_results_BPQ_questionnaires_p-adjusted_for_all_hypotheses.csv", row.names = FALSE)
+
+
+```
+All MAIAs
+```{r lm for loop: MAIAs}
+
+# Initialize a list to store the results
+combined_results_maia <- list()
+
+for (var in MAIA_vars) {
+  
+  lm_result <- lm(as.formula(paste(var, "~ group + age + sex + education_years + body_mass_index")), 
+                  data = data,
+                  na.action = na.omit)
+  
+  # Get ANOVA table
+  anova_table <- anova(lm_result)
+  
+  # Add predictor and outcome columns
+  anova_table$predictor <- rownames(anova_table)
+  rownames(anova_table) <- NULL
+  anova_table$outcome <- rep(var, times = nrow(anova_table))
+  
+  # Calculate df_den
+  n <- nobs(lm_result)
+  k <- length(levels(data$group))
+  df_den <- n - k
+  anova_table$df_den <- df_den
+  
+  # Rename columns
+  colnames(anova_table) <- c("df_num","sum_sq","mean_sq","f","p","predictor","outcome","df_den")
+  
+  # Reorder the columns
+  anova_table <- anova_table[,c("outcome","predictor","sum_sq","mean_sq","df_num","df_den","f","p")]
+  
+   # Extract coefficients from the linear model
+  summary_lm <- summary(lm_result)
+  coefficients <- summary_lm$coefficients
+  
+  # Convert coefficients to a data frame
+  coef_df <- as.data.frame(coefficients)
+  
+  # Add predictor and outcome columns to the coefficients data frame
+  coef_df$predictor <- rownames(coef_df)
+  rownames(coef_df) <- NULL
+  coef_df$outcome <- rep(var, times = nrow(coef_df))
+  
+  # Rename coefficient columns for clarity
+  colnames(coef_df) <- c("estimate", "std_error", "t_value", "p_value", "predictor", "outcome")
+  
+  # Merge the ANOVA and coefficient tables on the predictor variable
+  combined_table <- merge(anova_table, coef_df, by = c("outcome", "predictor"), all = TRUE)
+  
+  # Store the combined results in the list
+  combined_results_maia[[var]] <- combined_table
+  
+}
+
+# Combine all results into one dataframe
+anova_results_df_maia_questionnaires <- do.call(rbind, combined_results_maia)
+
+#### Option 1: adjust for all covars:
+anova_results_df_maia_questionnaires_adjusted_for_all_covars <- anova_results_df_maia_questionnaires
+anova_results_df_maia_questionnaires_adjusted_for_all_covars$p_adjusted <- p.adjust(anova_results_df_maia_questionnaires_adjusted_for_all_covars$p, method = "BH")
+# Save !!!
+write.csv(anova_results_df_maia_questionnaires_adjusted_for_all_covars, file = "/Users/denizyilmaz/Desktop/BrainTrain/Results/anova_lm_results_MAIA_questionnaires_p-adjusted_for_all_covars.csv", row.names = FALSE)
+
+
+#### Option 2: adjust only per hypothesis / questionnaire / get only results of interest
+# Filter the results where the predictor is either "group" or "groupSZ"
+maia_results_of_interest <- anova_results_df_maia_questionnaires[
+  anova_results_df_maia_questionnaires$predictor %in%  c("group", "groupSZ"),
+]
+# Correct for multiple comparisons using the Benjamini-Hochberg procedure
+maia_results_of_interest$p_adjusted <- p.adjust(maia_results_of_interest$p, method = "fdr",  n = length(MAIA_vars))    # method = "BH"
+# https://stackoverflow.com/questions/30108510/p-adjust-with-n-than-number-of-tests
+# https://stats.stackexchange.com/questions/417234/how-to-correct-p-values-of-two-multiple-regression-models
+
+# save
+#write.csv(maia_results_of_interest, file = "/Users/denizyilmaz/Desktop/BrainTrain/Results/anova_lm_results_MAIA_questionnaires_p-adjusted_for_all_hypotheses.csv", row.names = FALSE)
+
+
+```
+CDS
+```{r CDS}
+# compute LMM and save statistics of main effect as data frame
+lm_result <- lm(CDS ~ group +age + sex + education_years + body_mass_index, 
+               data=data,
+               na.action=na.omit)
+
+
+# get the model fits:  AIC (Akaike Information Criterion), or BIC (Bayesian Information Criterion)
+#AIC(lm_result)
+#BIC(lm_result)
+
+# Get the summary of the model to extract the coefficients
+summary_lm <- summary(lm_result)
+print(summary_lm)
+# Extract coefficients, standard errors, t-values, and p-values
+coefficients <- summary_lm$coefficients
+# View the structure of coefficients to understand its layout
+str(coefficients)
+# Print the coefficients and their significance
+print(coefficients)
+
+# anova() Computes analysis of variance (or deviance) tables for one or more fitted model objects.
+anova_table_cds <- anova(lm_result)
+
+# Add predictor and outcome columns
+anova_table_cds$predictor <- rownames(anova_table_cds)
+rownames(anova_table_cds) <- NULL # now we have a col for predictors, dont need the rownames
+anova_table_cds$outcome <- rep("CDS", times = nrow(anova_table_cds))
+# df_den
+n <- nobs(lm_result)
+k <- length(levels(data$group))
+df_den = n - k
+anova_table_cds$df_den <- df_den
+
+# Rename the columns appropriately
+colnames(anova_table_cds) = c("df_num","sum_sq","mean_sq","f","p","predictor","outcome", "df_den")
+
+# Reorder the columns
+anova_table_cds = anova_table_cds[,c("outcome","predictor","sum_sq","mean_sq","df_num","df_den","f","p")]
+
+# Format p-values to avoid scientific notation
+anova_table_cds$p <- format(anova_table_cds$p, scientific = FALSE, digits = 3)
+
+# Correct for multiple comparisons using the Benjamini-Hochberg procedure, for 3 families of quuestionnaires, bpq, maia, cds
+anova_table_cds_corrected <- anova_table_cds[
+  anova_table_cds$predictor %in% c("group"), 
+]
+nr_of_test_fams = 3
+anova_table_cds_corrected$p_adjusted <- p.adjust(anova_table_cds_corrected$p, method = "BH", n = nr_of_test_fams ) # , 
+
+# SAVE
+write.csv(anova_table_cds, file = "/Users/denizyilmaz/Desktop/BrainTrain/Results/anova_lm_results_CDS_not_adjusted.csv", row.names = FALSE)
+
+write.csv(anova_table_cds_corrected, file = "/Users/denizyilmaz/Desktop/BrainTrain/Results/anova_lm_results_CDS_p-adjusted_for_all_3-tests.csv", row.names = FALSE)
+
+
+```
+
+
+
+PLOT BPQ_total
+```{r plot single}
+
+# Create a violin plot of BPQ_total by group
+ggplot(data, aes(x = group, y = BPQ_total, fill = group)) +
+  geom_violin(trim = FALSE) +  # Show the full distribution
+  geom_jitter(width = 0.2, alpha = 0.5) +  # Show individual data points
+  labs(title = "Distribution of BPQ_total by Group", 
+       x = "Group", 
+       y = "BPQ_total") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set3")  # Optional: better color scheme
+
+```
+
+PLOT VIOLIN BPQ ALL 
+```{r plot manual}
+
+# Create individual violin plots
+p1 <- ggplot(data, aes(x = group, y = BPQ_body_awareness, fill = group)) +
+  geom_violin(trim = FALSE) +
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  labs(title = "BPQ Body Awareness", x = "Group", y = "Value") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set3")
+
+p2 <- ggplot(data, aes(x = group, y = BPQ_autonomic, fill = group)) +
+  geom_violin(trim = FALSE) +
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  labs(title = "BPQ Autonomic", x = "Group", y = "Value") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set3")
+
+p3 <- ggplot(data, aes(x = group, y = BPQ_sub_diaphragmatic, fill = group)) +
+  geom_violin(trim = FALSE) +
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  labs(title = "BPQ Sub Diaphragmatic", x = "Group", y = "Value") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set3")
+
+p4 <- ggplot(data, aes(x = group, y = BPQ_supra_diaphragmatic, fill = group)) +
+  geom_violin(trim = FALSE) +
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  labs(title = "BPQ Supra Diaphragmatic", x = "Group", y = "Value") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set3")
+
+p5 <- ggplot(data, aes(x = group, y = BPQ_total, fill = group)) +
+  geom_violin(trim = FALSE) +
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  labs(title = "BPQ Total", x = "Group", y = "Value") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set3")
+
+# Combine the plots into a grid
+# grid.arrange(p1, p2, p3, p4, p5, ncol = 3)
+
+# Combine the plots into a grid
+(p1 | p2 | p3) / (p4 | p5)
+
+```
+
+PLOT Boxplot ALL BPQ
+```{r}
+
+# Set color palette
+color_palette <- brewer.pal(n = 8, name = "Set3")
+
+# Define function to create box plots
+create_box_plot <- function(data, y_var, color_palette) {
+  ggplot(data, aes(x = group, y = .data[[y_var]], fill = group)) +
+    geom_boxplot(outlier.colour = "black", outlier.shape = 16) +
+    geom_jitter(width = 0.2, alpha = 0.5, color = "black") +
+    scale_fill_manual(values = color_palette) +
+    labs(title = y_var, x = "Group", y = "Value") +
+    theme_minimal() +
+    theme(
+      legend.position = "none",
+      plot.title = element_text(size = 16)
+    )
+}
+
+# Create plots for each variable
+p1 <- create_box_plot(data, "BPQ_body_awareness", color_palette)
+p2 <- create_box_plot(data, "BPQ_autonomic", color_palette)
+p3 <- create_box_plot(data, "BPQ_sub_diaphragmatic", color_palette)
+p4 <- create_box_plot(data, "BPQ_supra_diaphragmatic", color_palette)
+p5 <- create_box_plot(data, "BPQ_total", color_palette)
+
+# Combine the plots into a grid
+bpq_boxplots <- (p1 | p2 | p3) / (p4 | p5)
+
+print(bpq_boxplots)
+
+ggsave("/Users/denizyilmaz/Desktop/BrainTrain/Results/bpq_boxplots.png", plot = bpq_boxplots, width = 12, height = 12, dpi = 300)
+
+
+
+```
+
+PLOT VIOLIN MAIA ALL
+```{r plot fun}
+
+# Set color palette
+color_palette <- brewer.pal(n = 8, name = "Set3")
+
+# Define function to create violin plots
+create_violin_plot <- function(data, y_var, color_palette) {
+  ggplot(data, aes(x = group, y = .data[[y_var]], fill = group)) +
+    geom_violin(trim = FALSE) +
+    geom_jitter(width = 0.2, alpha = 0.5, color = "black") +
+    scale_fill_manual(values = color_palette) +
+    labs(title = y_var, x = "Group", y = "Value") +
+    theme_minimal() +
+    theme(legend.position = "none",
+    plot.title = element_text(size = 16))
+}
+
+# Create plots for each variable
+p1 <- create_violin_plot(data, "MAIA_noticing", color_palette)
+p2 <- create_violin_plot(data, "MAIA_not_distracting", color_palette)
+p3 <- create_violin_plot(data, "MAIA_not_worrying", color_palette)
+p4 <- create_violin_plot(data, "MAIA_attention_regulation", color_palette)
+p5 <- create_violin_plot(data, "MAIA_emotional_awareness", color_palette)
+p6 <- create_violin_plot(data, "MAIA_self_regulation", color_palette)
+p7 <- create_violin_plot(data, "MAIA_body_listening", color_palette)
+p8 <- create_violin_plot(data, "MAIA_trusting", color_palette)
+p9 <- create_violin_plot(data, "MAIA_total", color_palette)
+
+# Combine the plots into a grid
+maia_plot <- (p1 | p2 | p3) / (p4 | p5 | p6) / (p7 | p8 | p9)
+
+# Print the combined plot
+print(maia_plot)
+
+
+# make a dummy plot to extract the legend
+# Create a dummy plot with legend
+legend_plot <- ggplot(data, aes(x = group, y = MAIA_noticing, fill = group)) +
+  geom_violin(trim = FALSE) +
+  scale_fill_manual(values = color_palette) +
+  theme_minimal() +
+  labs(fill = "Group")
+
+legend_plot
+
+ggsave("/Users/denizyilmaz/Desktop/BrainTrain/Results/maia_plots.png", plot = maia_plot, width = 12, height = 12, dpi = 300)
+ggsave("/Users/denizyilmaz/Desktop/BrainTrain/Results/maia_plots_for_legend.png", plot = legend_plot, width = 12, height = 12, dpi = 300)
+
+
+```
+
+PLOT Boxplot MAIA ALL
+```{r plot fun}
+# Set color palette
+color_palette <- brewer.pal(n = 8, name = "Set3")
+
+# Define function to create box plots
+create_box_plot <- function(data, y_var, color_palette) {
+  ggplot(data, aes(x = group, y = .data[[y_var]], fill = group)) +
+    geom_boxplot(outlier.colour = "black", outlier.shape = 16) +
+    geom_jitter(width = 0.2, alpha = 0.5, color = "black") +
+    scale_fill_manual(values = color_palette) +
+    labs(title = y_var, x = "Group", y = "Value") +
+    theme_minimal() +
+    theme(
+      legend.position = "none",
+      plot.title = element_text(size = 16)
+    )
+}
+
+# Create plots for each variable
+p1 <- create_box_plot(data, "MAIA_noticing", color_palette)
+p2 <- create_box_plot(data, "MAIA_not_distracting", color_palette)
+p3 <- create_box_plot(data, "MAIA_not_worrying", color_palette)
+p4 <- create_box_plot(data, "MAIA_attention_regulation", color_palette)
+p5 <- create_box_plot(data, "MAIA_emotional_awareness", color_palette)
+p6 <- create_box_plot(data, "MAIA_self_regulation", color_palette)
+p7 <- create_box_plot(data, "MAIA_body_listening", color_palette)
+p8 <- create_box_plot(data, "MAIA_trusting", color_palette)
+p9 <- create_box_plot(data, "MAIA_total", color_palette)
+
+# Combine the plots into a grid
+maia_boxplot <- (p1 | p2 | p3) / (p4 | p5 | p6) / (p7 | p8 | p9)
+
+# Print the combined plot
+print(maia_boxplot)
+
+ggsave("/Users/denizyilmaz/Desktop/BrainTrain/Results/maia_boxplots.png", plot = maia_boxplot, width = 12, height = 12, dpi = 300)
+
+```
+
+PLOT CDS
+```{r}
+
+# Create a violin plot of BPQ_total by group
+cds_plot <- ggplot(data, aes(x = group, y = CDS, fill = group)) +
+  geom_boxplot(trim = FALSE) +  # Show the full distribution
+  geom_jitter(width = 0.2, alpha = 0.5) +  # Show individual data points
+  labs(title = "Distribution of Depersonalization by Group", 
+       x = "Group", 
+       y = "CDS") +
+  theme_minimal() +
+  theme ( legend.position = c(0.9, 0.8),
+          legend.text = element_text(size = 18),  # Increase legend text size
+          legend.title = element_text(size = 18), # Increase legend title size
+          legend.key.size = unit(1.5, "cm"), 
+          plot.title = element_text(size = 18, face = "bold"),  # Title size and bold
+          axis.title = element_text(size = 18),   # Axis title size
+          axis.text = element_text(size = 14),    # Axis text size
+          strip.text = element_text(size = 16)  ) +
+  scale_fill_brewer(palette = "Set3")  # Optional: better color scheme
+
+cds_plot
+
+ggsave("/Users/denizyilmaz/Desktop/BrainTrain/Results/cds_boxplot.jpg", plot = cds_plot, width = 12, height = 12, dpi = 300)
+
+
+```
+
+
+### 1.2) Interoceptive accuracy will be reduced in patients as measured by the Heartbeat Counting Task (HCT). (directional hypothesis)
+
+We will build a regression model for each hypothesis, where the variables of interest (Interoceptive Sensibility and Interoceptive Accuracy data) will be the dependent variable and the diagnostic group (HC vs. SSD) will be the predictor, along with the covariates of age, gender, BMI, and years of education. For the Interoceptive Accuracy model, we will also add Heart Rate (HR), smoking, caffeine intake, knowledge of heart rate, and the Not-Worrying subscale of MAIA as a proxy for anxiety about bodily sensations as covariates.
+
+ADD HR
+```{r create df / add HR to df}
+
+# Filter rows where HCT_counted_body is not 0 or is NA
+hct_data <- data[is.na(data$HCT_counted_body) | data$HCT_counted_body != 0, ]
+
+# Get only BL and HCT 
+ecg_data_merged_bl_hct <- ecg_data_merged_bl[ecg_data_merged_bl$task == "hct", ]
+
+# merge on common. cols
+common_cols <- intersect(colnames(hct_data), colnames(ecg_data_merged_bl_hct))
+hct_hr_data <- full_join(hct_data, ecg_data_merged_bl_hct, by = common_cols)
+
+# WHY ARE A COUPLE PEOPLE NA? bc they were excluded subs or counted non-body also!
+
+
+```
+
+
+TEST IAcc
+```{r lm}
+
+  
+# compute LMM and save statistics of main effect as data frame
+lm_result <- lm(interoceptive_accuracy ~ group + age + sex + education_years + body_mass_index + heart_rate_bpm + smoker + had_caffeine + knows_heartrate + MAIA_not_worrying, 
+               data=hct_hr_data,
+               na.action=na.omit)
+
+
+# get the model fits:  AIC (Akaike Information Criterion), or BIC (Bayesian Information Criterion)
+#AIC(lm_result)
+#BIC(lm_result)
+
+# anova() Computes analysis of variance (or deviance) tables for one or more fitted model objects.
+anova_table <- anova(lm_result)
+
+# Add predictor and outcome columns
+anova_table$predictor <- rownames(anova_table)
+rownames(anova_table) <- NULL # now we have a col for predictors, dont need the rownames
+anova_table$outcome <- rep("interoceptive_accuracy", times = nrow(anova_table))
+# df_den
+n <- nobs(lm_result)
+k <- length(levels(data$group))
+df_den = n - k
+anova_table$df_den <- df_den
+
+# Rename the columns appropriately
+colnames(anova_table) = c("df_num","sum_sq","mean_sq","f","p","predictor","outcome", "df_den")
+
+# Reorder the columns
+anova_table = anova_table[,c("outcome","predictor","sum_sq","mean_sq","df_num","df_den","f","p")]
+
+# Format p-values to avoid scientific notation
+anova_table$p <- format(anova_table$p, scientific = FALSE, digits = 3)
+
+# Get the summary of the model to extract the coefficients
+summary_lm <- summary(lm_result)
+print(summary_lm)
+# Extract coefficients, standard errors, t-values, and p-values
+coefficients <- summary_lm$coefficients
+# View the structure of coefficients to understand its layout
+str(coefficients)
+# Print the coefficients and their significance
+print(coefficients)
+
+# Convert coefficients to a data frame
+coef_df <- as.data.frame(coefficients)
+  
+# Add predictor and outcome columns to the coefficients data frame
+coef_df$predictor <- rownames(coef_df)
+rownames(coef_df) <- NULL
+coef_df$outcome <- rep("interoceptive_accuracy", times = nrow(coef_df))
+
+# Rename coefficient columns for clarity
+colnames(coef_df) <- c("estimate", "std_error", "t_value", "p_value", "predictor", "outcome")
+
+# Merge the ANOVA and coefficient tables on the predictor variable
+combined_table_interoceptive_accuracy <- merge(anova_table, coef_df, by = c("outcome", "predictor"), all = TRUE)
+
+# effect Size too 
+
+# Calculate the effect size (eta-squared)
+effect_size <- etaSquared(lm_result)
+effect_size_df <- as.data.frame(effect_size)
+# Add predictor and outcome columns to the coefficients data frame
+effect_size_df$predictor <- rownames(effect_size_df)
+rownames(effect_size_df) <- NULL
+effect_size_df$outcome <- rep("interoceptive_accuracy", times = nrow(effect_size_df))
+
+# Rename coefficient columns for clarity
+colnames(effect_size_df) <- c("eta_sq", "partial_eta_sq", "predictor", "outcome")
+
+
+# Merge the ANOVA and coefficient tables on the predictor variable
+combined_table_interoceptive_accuracy_eta <- full_join(combined_table_interoceptive_accuracy, effect_size_df, by = c("outcome", "predictor"))
+
+#SAVE
+write.csv(combined_table_interoceptive_accuracy_eta, file = "/Users/denizyilmaz/Desktop/BrainTrain/Results/anova_lm_results_interoceptive_accuracy.csv", row.names = FALSE)
+
+```
+
+PLOT IAcc
+```{r}
+
+# Create a violin plot of BPQ_total by group
+iacc_plot <- ggplot(data, aes(x = group, y = interoceptive_accuracy, fill = group)) +
+  geom_boxplot(trim = FALSE) +  # Show the full distribution
+  geom_jitter(width = 0.2, alpha = 0.5) +  # Show individual data points
+  labs(title = "Interoceptive Accuracy by Group", 
+       x = "Group", 
+       y = "Interoceptive Accuracy") +
+  theme_minimal() +
+  theme ( legend.position = c(0.9, 0.8),
+          legend.text = element_text(size = 18),  # Increase legend text size
+          legend.title = element_text(size = 18), # Increase legend title size
+          legend.key.size = unit(1.5, "cm"), 
+          plot.title = element_text(size = 18, face = "bold"),  # Title size and bold
+          axis.title = element_text(size = 18),   # Axis title size
+          axis.text = element_text(size = 14),    # Axis text size
+          strip.text = element_text(size = 16)  ) +
+  scale_fill_brewer(palette = "Set3")  # Optional: better color scheme
+
+iacc_plot
+
+ggsave("/Users/denizyilmaz/Desktop/BrainTrain/Results/interoceptive_accuracy_boxplot.jpg", plot = iacc_plot, width = 12, height = 12, dpi = 300)
+
+
+```
+
+
+### 1.3) At rest, a higher amplitude of the Heartbeat Evoked Potential (HEP; 450-500 ms post-ECG R-peak, in frontal central regions, especially for the Fp2, F4, F8 electrodes) for patients will denote altered interoception on the neural level. (directional hypothesis). 
+
+We will run 2×3 Analyses of Covariance (ANCOVA) to inspect the HEP differences between the groups (between-subject variable with 2 levels: HC and SSD) across different tasks (within-subject variable with 3 levels: eyes-closed, eyes-open, HCT), while controlling for the covariates: age, gender, body mass index (BMI), educational level, smoking, caffeine intake, HR, QT interval, QTc interval, the R wave amplitude, and Root Mean Square of Successive Differences (RMSSD), and the Not-Worrying subscale of MAIA as a proxy for anxiety about bodily sensations. 
+
+Utilizing an ANCOVA will allow us to scrutinize the differential HEP modulation through directed attention between groups (significant interaction effects will be tested with Tukey’s HSD post-hoc tests). Parallel to Koreki and colleagues (2024), we will focus on the frontal-central regions. We will run an ANCOVA on the HEP amplitude averaged across all frontal-central areas, as well as running individual ANCOVAs for each electrode within this region ('Fp1', 'Fp2', 'F3', 'F4', 'F7', 'F8', 'Fz', 'FC1', 'FC2', 'FC5', 'FC6', 'C3', 'C4', 'Cz'). To address the issue of multiple comparisons and identify assembles of significant electrodes, we will conduct a cluster-based correction analysis.
+
+
+convert amplitudes from volts to microVolts
+```{r}
+# Convert amplitudes from volts to microvolts
+hep_ecg_beh_data$F4_mean_amplitude <- hep_ecg_beh_data$F4_mean_amplitude * 1e6
+hep_ecg_beh_data$F8_mean_amplitude <- hep_ecg_beh_data$F8_mean_amplitude * 1e6
+hep_ecg_beh_data$Fp2_mean_amplitude <- hep_ecg_beh_data$Fp2_mean_amplitude * 1e6
+
+
+```
+
+Define Task order
+```{r}
+# Reorder the 'task' variable to appear in the desired order
+task_order <- c("eyes-open", "eyes-closed", "hct")
+hep_ecg_beh_data$task <- factor(hep_ecg_beh_data$task, levels = task_order)
+
+```
+
+get channel names
+```{r channels, frontal_central_regions}
+# I can get any since they are all the same
+channels <- hep_ecg_beh_data$channels[1]
+
+# Define the character vector
+frontal_central_regions <- c('Fp1', 'Fp2', 'F3', 'F4', 'F7', 'F8', 'Fz', 
+                              'FC1', 'FC2', 'FC5', 'FC6', 'C3', 'C4', 'Cz')
+
+hypothesis_regions <- c("F8", "F4", "Fp2")
+
+```
+
+
+1) Three hypothesis-driven Channels
+
+NOTE: Nothing was significant now, so no need, but in the future, you may need to correct also these 3 tests for multiple comparisons!
+F4
+```{r F4 ancova / lm / emmeans}
+
+# Perform ANCOVA
+ancova_result <- aov(F4_mean_amplitude ~ group*task + age + sex + education_years + body_mass_index  + smoker + had_caffeine  + 
+                       heart_rate_bpm + hrv_rmssd_ms + QT_interval_ms  +  QTc_interval_ms  + R_peak_amplitude_mV + 
+                       MAIA_not_worrying, 
+                       data = hep_ecg_beh_data)
+
+# Perform LM
+lm_result <- lm(F4_mean_amplitude ~ group*task + age + sex + education_years + body_mass_index  + smoker + had_caffeine  + 
+                       heart_rate_bpm + hrv_rmssd_ms + QT_interval_ms  +  QTc_interval_ms  + R_peak_amplitude_mV + 
+                       MAIA_not_worrying, 
+                       data = hep_ecg_beh_data)
+
+# Summary of the ANCOVA result
+summary(ancova_result)
+
+emm <- emmeans(ancova_result, ~ group * task)
+pairwise_results <- pairs(emm)
+summary(emm)
+plot(emm)
+
+# Convert emmeans results to a data frame
+emm_df <- as.data.frame(emm)
+
+# Plot using ggplot2 with larger axis labels and a title
+emmeans_plot <- ggplot(emm_df, aes(x = task, y = emmean, color = group, group = group)) +
+  geom_line(size = 1.5) +          # Line for each group
+  geom_point(size = 4) + # Points for each group
+  geom_errorbar(aes(ymin = emmean - SE, ymax = emmean + SE), width = 0.4, size = 1.2) + # Error bars
+  scale_color_manual(values = c("#d84a37", "#004d00")) +  # Custom colors
+  labs(x = "Task", y = "Estimated Marginal Means", color = "Group") +      # Axis and legend labels
+  ggtitle("F4 HEP Mean Amplitude") +  # Add the title
+  theme_minimal() +      # Minimal theme for clean look
+  theme(
+    axis.title = element_text(size = 20),    # Increase axis title size
+    axis.text = element_text(size = 20),     # Increase axis text size
+    legend.text = element_text(size = 14),   # Increase legend text size
+    legend.title = element_text(size = 16),  # Increase legend title size
+    strip.text = element_text(size = 16),    # Increase size of facet labels (if any)
+    plot.title = element_text(size = 20, hjust = 0.5)  # Title size and center alignment
+  )
+
+# SAVE
+ggsave("/Users/denizyilmaz/Desktop/BrainTrain/Results/F4_emmeans_plot.jpg", plot = emmeans_plot, width = 12, height = 12, dpi = 300)
+
+
+### From LM ###
+
+# Get the summary of the model to extract the coefficients
+summary_lm <- summary(lm_result)
+print(summary_lm)
+# Extract coefficients, standard errors, t-values, and p-values
+coefficients <- summary_lm$coefficients
+# View the structure of coefficients to understand its layout
+str(coefficients)
+# Print the coefficients and their significance
+print(coefficients)
+
+```
+
+F8
+```{r F8 ancova / lm / emmeans}
+
+# Perform ANCOVA
+ancova_result <- aov(F8_mean_amplitude ~ group*task + age + sex + education_years + body_mass_index  + smoker + had_caffeine  + 
+                       heart_rate_bpm + hrv_rmssd_ms + QT_interval_ms  +  QTc_interval_ms  + R_peak_amplitude_mV + 
+                       MAIA_not_worrying, 
+                       data = hep_ecg_beh_data)
+
+# Perform LM
+lm_result <- lm(F8_mean_amplitude ~ group*task + age + sex + education_years + body_mass_index  + smoker + had_caffeine  + 
+                       heart_rate_bpm + hrv_rmssd_ms + QT_interval_ms  +  QTc_interval_ms  + R_peak_amplitude_mV + 
+                       MAIA_not_worrying, 
+                       data = hep_ecg_beh_data)
+
+# Summary of the ANCOVA result
+summary(ancova_result)
+
+emm <- emmeans(ancova_result, ~ group * task)
+pairwise_results <- pairs(emm)
+summary(emm)
+plot(emm)
+
+# Convert emmeans results to a data frame
+emm_df <- as.data.frame(emm)
+
+# Plot using ggplot2 with larger axis labels and a title
+emmeans_plot <- ggplot(emm_df, aes(x = task, y = emmean, color = group, group = group)) +
+  geom_line(size = 1.5) +          # Line for each group
+  geom_point(size = 4) + # Points for each group
+  geom_errorbar(aes(ymin = emmean - SE, ymax = emmean + SE), width = 0.4, size = 1.2) + # Error bars
+  scale_color_manual(values = c("#d84a37", "#004d00")) +  # Custom colors
+  labs(x = "Task", y = "Estimated Marginal Means", color = "Group") +      # Axis and legend labels
+  ggtitle("F8 HEP Mean Amplitude") +  # Add the title
+  theme_minimal() +      # Minimal theme for clean look
+  theme(
+    axis.title = element_text(size = 20),    # Increase axis title size
+    axis.text = element_text(size = 20),     # Increase axis text size
+    legend.text = element_text(size = 14),   # Increase legend text size
+    legend.title = element_text(size = 16),  # Increase legend title size
+    strip.text = element_text(size = 16),    # Increase size of facet labels (if any)
+    plot.title = element_text(size = 20, hjust = 0.5)  # Title size and center alignment
+  )
+
+# SAVE
+ggsave("/Users/denizyilmaz/Desktop/BrainTrain/Results/F8_emmeans_plot.jpg", plot = emmeans_plot, width = 12, height = 12, dpi = 300)
+
+
+### From LM ###
+
+# Get the summary of the model to extract the coefficients
+summary_lm <- summary(lm_result)
+print(summary_lm)
+# Extract coefficients, standard errors, t-values, and p-values
+coefficients <- summary_lm$coefficients
+# View the structure of coefficients to understand its layout
+str(coefficients)
+# Print the coefficients and their significance
+print(coefficients)
+
+```
+
+Fp2
+```{r F8 ancova / lm / emmeans}
+
+# Perform ANCOVA
+ancova_result <- aov(Fp2_mean_amplitude ~ group*task + age + sex + education_years + body_mass_index  + smoker + had_caffeine  + 
+                       heart_rate_bpm + hrv_rmssd_ms + QT_interval_ms  +  QTc_interval_ms  + R_peak_amplitude_mV + 
+                       MAIA_not_worrying, 
+                       data = hep_ecg_beh_data)
+
+# Perform LM
+lm_result <- lm(Fp2_mean_amplitude ~ group*task + age + sex + education_years + body_mass_index  + smoker + had_caffeine  + 
+                       heart_rate_bpm + hrv_rmssd_ms + QT_interval_ms  +  QTc_interval_ms  + R_peak_amplitude_mV + 
+                       MAIA_not_worrying, 
+                       data = hep_ecg_beh_data)
+
+# Summary of the ANCOVA result
+summary(ancova_result)
+
+emm <- emmeans(ancova_result, ~ group * task)
+pairwise_results <- pairs(emm)
+summary(emm)
+plot(emm)
+
+# Convert emmeans results to a data frame
+emm_df <- as.data.frame(emm)
+
+# Plot using ggplot2 with larger axis labels and a title
+emmeans_plot <- ggplot(emm_df, aes(x = task, y = emmean, color = group, group = group)) +
+  geom_line(size = 1.5) +          # Line for each group
+  geom_point(size = 4) + # Points for each group
+  geom_errorbar(aes(ymin = emmean - SE, ymax = emmean + SE), width = 0.4, size = 1.2) + # Error bars
+  scale_color_manual(values = c("#d84a37", "#004d00")) +  # Custom colors
+  labs(x = "Task", y = "Estimated Marginal Means", color = "Group") +      # Axis and legend labels
+  ggtitle("Fp2 HEP Mean Amplitude") +  # Add the title
+  theme_minimal() +      # Minimal theme for clean look
+  theme(
+    axis.title = element_text(size = 20),    # Increase axis title size
+    axis.text = element_text(size = 20),     # Increase axis text size
+    legend.text = element_text(size = 14),   # Increase legend text size
+    legend.title = element_text(size = 16),  # Increase legend title size
+    strip.text = element_text(size = 16),    # Increase size of facet labels (if any)
+    plot.title = element_text(size = 20, hjust = 0.5)  # Title size and center alignment
+  )
+
+# SAVE
+ggsave("/Users/denizyilmaz/Desktop/BrainTrain/Results/Fp2_emmeans_plot.jpg", plot = emmeans_plot, width = 12, height = 12, dpi = 300)
+
+
+### From LM ###
+
+# Get the summary of the model to extract the coefficients
+summary_lm <- summary(lm_result)
+print(summary_lm)
+# Extract coefficients, standard errors, t-values, and p-values
+coefficients <- summary_lm$coefficients
+# View the structure of coefficients to understand its layout
+str(coefficients)
+# Print the coefficients and their significance
+print(coefficients)
+
+```
+
+
+2) All channels: Exploratory 
+
+create exploded long data for all channels 
+```{r create a col for each }
+
+df_copy <- hep_ecg_beh_data
+
+# turn the channels and hep_mean_amplitudes to R-type lists...
+df_copy$channels <- strsplit(as.character(df_copy$channels), ",")  
+
+# Function to clean and extract numeric values
+extract_numbers <- function(x) {
+  # Remove newline characters and multiple spaces
+  cleaned_string <- gsub("\\s+", " ", gsub("\\n", " ", x))
+  
+  # Remove leading "[" and trailing "]"
+  cleaned_string <- gsub("^\\[|\\]$", "", cleaned_string)
+  
+  # Split by spaces
+  numbers <- unlist(strsplit(cleaned_string, " "))
+  
+  # Remove empty strings and whitespace
+  numbers <- numbers[nzchar(numbers)]
+  
+  # Filter valid numeric entries
+  numbers <- numbers[grepl("^[+-]?\\d*\\.?\\d+([eE][+-]?\\d+)?$", numbers)]
+  
+  return(numbers)
+}
+
+# Apply the function to the column
+df_copy$hep_mean_amplitudes <- lapply(df_copy$hep_mean_amplitudes, extract_numbers)
+
+
+# Remove newline characters and extra whitespace
+# df_copy$hep_mean_amplitudes <- gsub("\n", "", df_copy$hep_mean_amplitudes)
+#df_copy$hep_mean_amplitudes <- trimws(df_copy$hep_mean_amplitudes)
+
+# Explode lists into separate rows
+hep_ecg_beh_data_exploded <- df_copy %>%
+  mutate(row_id = row_number()) %>%
+  unnest(cols = c(channels, hep_mean_amplitudes))
+
+# Pivot the DataFrame
+df_pivot <- hep_ecg_beh_data_exploded %>%
+  select(-row_id) %>%
+  pivot_wider(names_from = channels, values_from = hep_mean_amplitudes)
+
+
+```
+
+Clean colnames and make vars appropriate for stats
+```{r clean data after explosion}
+
+### clean the colnames
+
+# Identify columns with single quotes
+cols_to_clean <- grep("'", colnames(df_pivot), value = TRUE)
+# indices
+indices_to_clean <- which(grepl("'", colnames(df_pivot)))
+
+# DOES NOT WORK WHEN DONE TOGETHER
+df_pivot <- df_pivot %>%
+  rename_with(~ ifelse(.x %in% cols_to_clean,
+                       paste0(gsub("'", "", gsub("[\\[\\]]", "", .x)), "_hep_mean_amplitude"),
+                       .x))  # Clean and add suffix only to specified columns
+
+###### WORKS 
+
+# Ensure no leading/trailing spaces in column names
+colnames(df_pivot) <- trimws(colnames(df_pivot))
+
+# Remove square brackets, single quotes, and any extra characters
+colnames(df_pivot) <- gsub("\\[|\\]|'", "", colnames(df_pivot))
+
+######
+
+# everything worked give it a nice name
+hep_ecg_beh_data_anocova <- df_pivot
+
+# make numeric & convert microvolts to Volts
+hep_ecg_beh_data_anocova[indices_to_clean] <- lapply(hep_ecg_beh_data_anocova[indices_to_clean], function(x) as.numeric(x) * 1e6)
+# df_pivot[indices_to_clean] <- lapply(df_pivot[indices_to_clean], function(x) as.numeric(x) * 1e6)
+# hep_ecg_beh_data_anocova[indices_to_clean] <- hep_ecg_beh_data_anocova[indices_to_clean] * 1e6
+
+# Suppress scientific notation for display
+options(scipen = 999)
+
+
+```
+
+Create the mean frontal-central HEP mean
+```{r frontal_central_HEP_mean}
+# Convert indices_to_clean to actual column names
+columns_to_check <- colnames(hep_ecg_beh_data_anocova)[indices_to_clean]
+
+# Filter columns that include any of the frontal_central_regions strings
+cols_to_average <- columns_to_check[sapply(columns_to_check, function(col_name) {
+  any(sapply(frontal_central_regions, function(region) grepl(region, col_name)))
+})]
+
+# create the average 
+hep_ecg_beh_data_anocova$frontal_central_HEP_mean <- rowMeans(hep_ecg_beh_data_anocova[, cols_to_average], na.rm = TRUE)
+
+```
+
+ANCOVA MEAN All Frontal Central
+```{r}
+# Perform ANCOVA
+ancova_result <- aov(frontal_central_HEP_mean ~ group*task + age + sex + education_years + body_mass_index  + smoker + had_caffeine  + 
+                       heart_rate_bpm + hrv_rmssd_ms + QT_interval_ms  +  QTc_interval_ms  + R_peak_amplitude_mV + 
+                       MAIA_not_worrying, 
+                       data = hep_ecg_beh_data_anocova)
+
+
+
+# Get the summary of the ANCOVA model to extract the coefficients
+ancova_summary <- summary(ancova_result)
+ancova_df <- as.data.frame(ancova_summary[[1]])
+# Add predictor and outcome columns
+ancova_df$predictor <- rownames(ancova_df)
+ancova_df$predictor <- trimws(ancova_df$predictor)
+rownames(ancova_df) <- NULL
+ancova_df$outcome <- rep("frontal_central_HEP_mean", times = nrow(ancova_df))
+
+# Calculate df_den
+n <- nobs(ancova_result)
+k <- length(levels(hep_ecg_beh_data_anocova$group))
+df_den <- n - k
+ancova_df$df_den <- df_den
+
+# Rename columns
+colnames(ancova_df) <- c("df_num","sum_sq","mean_sq","f","p","predictor","outcome","df_den")
+
+# Reorder the columns
+ancova_df <- ancova_df[,c("outcome","predictor","sum_sq","mean_sq","df_num","df_den","f","p")]
+
+# Calculate the effect size (eta-squared)
+effect_size <- etaSquared(ancova_result)
+# print(effect_size)
+# Extract df
+effect_size_df <- as.data.frame(effect_size)
+
+# Add predictor and outcome columns to the coefficients data frame
+effect_size_df$predictor <- rownames(effect_size_df)
+rownames(effect_size_df) <- NULL
+effect_size_df$outcome <- rep("frontal_central_HEP_mean", times = nrow(effect_size_df))
+
+# Rename coefficient columns for clarity
+colnames(effect_size_df) <- c("eta_sq", "partial_eta_sq", "predictor", "outcome")
+
+
+# Merge the ANOVA and coefficient tables on the predictor variable
+combined_table <- full_join(ancova_df, effect_size_df, by = c("outcome", "predictor"))
+
+## save
+write.csv(combined_table, file = "/Users/denizyilmaz/Desktop/BrainTrain/Results/ancova_results_heps_averaged_frontal_central.csv", row.names = FALSE)
+
+
+  
+##### OLD #####
+
+# Summary of the ANCOVA result
+ancova_summary <- summary(ancova_result)
+print(ancova_summary)
+# Extract df
+ancova_df <- as.data.frame(ancova_summary[[1]])
+
+# Calculate the effect size (eta-squared)
+effect_size <- etaSquared(ancova_result)
+print(effect_size)
+# Extract df
+effect_size_df <- as.data.frame(effect_size)
+
+# Combine the ANCOVA summary and effect sizes
+result_df <- cbind(ancova_df, effect_size_df)
+
+# Print the combined summary
+# print(ancova_summary_with_effect_size)
+
+## IF U WANT COEFSS u need to fit a lm model!
+
+# Extract coefficients, standard errors, t-values, and p-values
+ancova_coefficients <- ancova_summary$coefficients
+# View the structure of coefficients to understand its layout
+str(ancova_coefficients)
+# Print the coefficients and their significance
+print(ancova_coefficients)
+
+```
+
+ANCOVA for my 3 ROIs separately
+```{r}
+
+rois <- c("Fp2_hep_mean_amplitude", "F4_hep_mean_amplitude", "F8_hep_mean_amplitude")
+
+# Initialize a list to store the results
+combined_ancova_results <- list()
+
+for (var in rois) {
+  
+  ancova_result <- aov(as.formula(paste(var, "~ group*task + age + sex + education_years + body_mass_index  + smoker + had_caffeine  + 
+                       heart_rate_bpm + hrv_rmssd_ms + QT_interval_ms  +  QTc_interval_ms  + R_peak_amplitude_mV + 
+                       MAIA_not_worrying")), 
+                  data = hep_ecg_beh_data_anocova,
+                  na.action = na.omit)
+  
+
+  # Get the summary of the ANCOVA model to extract the coefficients
+  ancova_summary <- summary(ancova_result)
+  ancova_df <- as.data.frame(ancova_summary[[1]])
+  # Add predictor and outcome columns
+  ancova_df$predictor <- rownames(ancova_df)
+  ancova_df$predictor <- trimws(ancova_df$predictor)
+  rownames(ancova_df) <- NULL
+  ancova_df$outcome <- rep(var, times = nrow(ancova_df))
+  
+  # Calculate df_den
+  n <- nobs(ancova_result)
+  k <- length(levels(data$group))
+  df_den <- n - k
+  ancova_df$df_den <- df_den
+  
+  # Rename columns
+  colnames(ancova_df) <- c("df_num","sum_sq","mean_sq","f","p","predictor","outcome","df_den")
+  
+  # Reorder the columns
+  ancova_df <- ancova_df[,c("outcome","predictor","sum_sq","mean_sq","df_num","df_den","f","p")]
+
+  # Calculate the effect size (eta-squared)
+  effect_size <- etaSquared(ancova_result)
+  # print(effect_size)
+  # Extract df
+  effect_size_df <- as.data.frame(effect_size)
+  
+  # Add predictor and outcome columns to the coefficients data frame
+  effect_size_df$predictor <- rownames(effect_size_df)
+  rownames(effect_size_df) <- NULL
+  effect_size_df$outcome <- rep(var, times = nrow(effect_size_df))
+  
+  # Rename coefficient columns for clarity
+  colnames(effect_size_df) <- c("eta_sq", "partial_eta_sq", "predictor", "outcome")
+  
+  
+  # Merge the ANOVA and coefficient tables on the predictor variable
+  combined_table <- full_join(ancova_df, effect_size_df, by = c("outcome", "predictor"))
+  
+  # Store the combined results in the list
+  combined_ancova_results[[var]] <- combined_table
+  
+}
+
+# Combine all results into one dataframe
+combined_ancova_results_df_rois <- do.call(rbind, combined_ancova_results)
+
+# Correct for multiple comparisons using the Benjamini-Hochberg procedure
+#anova_results_df_questionnaires$p_adjusted <- p.adjust(anova_results_df_questionnaires$p, method = "BH") # add n_length!! https://stackoverflow.com/questions/30108510/p-adjust-with-n-than-number-of-tests
+
+# Format p-values to avoid scientific notation
+#anova_results_df_questionnaires$p_adjusted <- format(anova_results_df_questionnaires$p_adjusted, scientific = FALSE, digits = 3)
+
+# View the results
+#print(anova_results_df_questionnaires)
+
+# SAVE !!!
+write.csv(combined_ancova_results_df_rois, file = "/Users/denizyilmaz/Desktop/BrainTrain/Results/ancova_results_hep_3_rois.csv", row.names = FALSE)
+```
+
+ANCOVA ALL Frontal Central Chans Loop: 
+NOTE: You could also consider adding the mean of all frontal central channels here as another "channel"?
+```{r}
+# Initialize a list to store the results
+combined_ancova_results <- list()
+
+for (var in cols_to_average) {
+  
+  ancova_result <- aov(as.formula(paste(var, "~ group*task + age + sex + education_years + body_mass_index  + smoker + had_caffeine  + 
+                       heart_rate_bpm + hrv_rmssd_ms + QT_interval_ms  +  QTc_interval_ms  + R_peak_amplitude_mV + 
+                       MAIA_not_worrying")), 
+                  data = hep_ecg_beh_data_anocova,
+                  na.action = na.omit)
+  
+
+  # Get the summary of the ANCOVA model to extract the coefficients
+  ancova_summary <- summary(ancova_result)
+  ancova_df <- as.data.frame(ancova_summary[[1]])
+  # Add predictor and outcome columns
+  ancova_df$predictor <- rownames(ancova_df)
+  ancova_df$predictor <- trimws(ancova_df$predictor)
+  rownames(ancova_df) <- NULL
+  ancova_df$outcome <- rep(var, times = nrow(ancova_df))
+  
+  # Calculate df_den
+  n <- nobs(ancova_result)
+  k <- length(levels(data$group))
+  df_den <- n - k
+  ancova_df$df_den <- df_den
+  
+  # Rename columns
+  colnames(ancova_df) <- c("df_num","sum_sq","mean_sq","f","p","predictor","outcome","df_den")
+  
+  # Reorder the columns
+  ancova_df <- ancova_df[,c("outcome","predictor","sum_sq","mean_sq","df_num","df_den","f","p")]
+
+  # Calculate the effect size (eta-squared)
+  effect_size <- etaSquared(ancova_result)
+  # print(effect_size)
+  # Extract df
+  effect_size_df <- as.data.frame(effect_size)
+  
+  # Add predictor and outcome columns to the coefficients data frame
+  effect_size_df$predictor <- rownames(effect_size_df)
+  rownames(effect_size_df) <- NULL
+  effect_size_df$outcome <- rep(var, times = nrow(effect_size_df))
+  
+  # Rename coefficient columns for clarity
+  colnames(effect_size_df) <- c("eta_sq", "partial_eta_sq", "predictor", "outcome")
+  
+  
+  # Merge the ANOVA and coefficient tables on the predictor variable
+  combined_table <- full_join(ancova_df, effect_size_df, by = c("outcome", "predictor"))
+  
+  # Store the combined results in the list
+  combined_ancova_results[[var]] <- combined_table
+  
+}
+
+# Combine all results into one dataframe
+combined_ancova_results_df <- do.call(rbind, combined_ancova_results)
+
+# Correct for multiple comparisons using the Benjamini-Hochberg procedure
+#anova_results_df_questionnaires$p_adjusted <- p.adjust(anova_results_df_questionnaires$p, method = "BH") # add n_length!! https://stackoverflow.com/questions/30108510/p-adjust-with-n-than-number-of-tests
+
+# Format p-values to avoid scientific notation
+#anova_results_df_questionnaires$p_adjusted <- format(anova_results_df_questionnaires$p_adjusted, scientific = FALSE, digits = 3)
+
+# View the results
+#print(anova_results_df_questionnaires)
+
+# SAVE !!!
+#write.csv(combined_ancova_results_df, file = "/Users/denizyilmaz/Desktop/BrainTrain/Results/ancova_results_hep_all_frontal_central.csv", row.names = FALSE)
+
+
+
+```
+
+Cluster-Based Correction Analysis: Better on MNE???
+```{r}
+
+```
+
+
+### 1.4) Control Analyses
+
+As control analyses, we will compare the demographics and the ECG data of HC and SSD samples with independent samples Student's t-tests for continuous variables (Mann-Whitney U Test in case of assumption violation) and chi-squared test for categorical variables (Fisher's Exact Test if assumptions violated). 
+
+## 2) Interoception measures will relate to global clinical outcomes (symptom severity measured by PANSS Total and cognitive deficits measured by BACS composite global scores) in patients with SSD. 
+
+The link between interoception measures (Interoceptive Sensibility, Interoceptive Accuracy, HEP amplitude) and global clinical outcomes (symptom severity measured by PANSS Total and cognitive deficits measured by BACS composite global scores) in patients with SSD, will be assessed by partial correlation analyses, controlling for age, gender, BMI, years of education, chlorpromazine equivalent dose, illness duration. For HCT and HEP analyses, we will also add smoking, caffeine intake, and clozapine dose as covariates.
+
+
