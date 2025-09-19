@@ -24,7 +24,7 @@ def ecg_analysis_fun(data_dir,
                      new_sfreq = 250,
                      baseline = (-0.125, -0.025),
                      ecg_epochs_tmin = -0.25,
-                     ecg_epochs_tmax = 0.7,
+                     ecg_epochs_tmax = 0.55,
                      time_window = (0.45, 0.50)
 ):
 

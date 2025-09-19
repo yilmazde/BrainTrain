@@ -236,7 +236,13 @@ def compute_heps_dp(data_dir,
 
                 # drop bad epochs
                 heartbeat_epochs.drop_bad(reject=epoch_reject_criteria)
-                percentage_dropped_epochs = heartbeat_epochs.drop_log_stats()
+                #percentage_dropped_epochs = heartbeat_epochs.drop_log_stats()
+                n_dropped_bad_epochs = sum(1 if len(x) > 0 else 0 for x in heartbeat_epochs.drop_log)
+                #percentage_dropped_epochs = (n_dropped_bad_epochs / total_epochs_nr) * 100
+                percentage_dropped_epochs = ((total_epochs_nr - len(heartbeat_epochs)) / total_epochs_nr) * 100
+
+
+
                 
                 # plot epochs
                 # heartbeat_epochs.plot(events = heartbeat_events_v1, event_id=event_id_v1)
@@ -279,7 +285,12 @@ def compute_heps_dp(data_dir,
 
                         # now drop bad epochs
                         heartbeat_epochs.drop_bad(reject=epoch_reject_criteria)
-                        percentage_dropped_epochs = heartbeat_epochs.drop_log_stats()
+                        n_dropped_bad_epochs = sum(1 if len(x) > 0 else 0 for x in heartbeat_epochs.drop_log)
+                        #percentage_dropped_epochs = heartbeat_epochs.drop_log_stats()
+                        #percentage_dropped_epochs = (n_dropped_bad_epochs / total_epochs_nr) * 100
+                        percentage_dropped_epochs = ((total_epochs_nr - len(heartbeat_epochs)) / total_epochs_nr) * 100
+
+
 
 
                     else:
@@ -345,6 +356,12 @@ def compute_heps_dp(data_dir,
 
 
                     print(f"Kept {len(heartbeat_epochs_clean)} / {len(heartbeat_epochs)} epochs")
+
+                else:
+                    percentage_dropped_epochs_including_double_peaks = percentage_dropped_epochs
+                    num_double_rpeak_epochs = 0
+                    heartbeat_epochs_clean = heartbeat_epochs
+                    
 
 
 
