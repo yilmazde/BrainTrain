@@ -32,14 +32,15 @@ import datetime
 import json
 
 #from pyprep import PreprocessingPipeline
-def compute_heps(data_dir,  
+def compute_heps_dp(data_dir,  
                  heart_epoch_tmin = -0.25, 
-                 heart_epoch_tmax = 0.7, 
+                 heart_epoch_tmax = 0.55, 
                  baseline = (-0.125, -0.025), 
                  epoch_reject_criteria=dict(eeg=150e-6),
                  bad_epoch_threshold=33,
                  time_window = (0.45, 0.50), 
-                 roi = ['Fp2','F4', 'F8']
+                 roi = ['Fp2','F4', 'F8'],
+                 double_rpeak_exclusion = True
                  ):
 
     """
@@ -110,7 +111,8 @@ def compute_heps(data_dir,
 
     # Define the column names for the DF (act.ly not necess but I like to have it in the end I added some more columns)
     column_names = ['subject_id', 'session', 'task', 'event_type',  'event_times', 'total_heart_events_nr',
-                    'total_epochs_nr', 'good_epoch_count','percentage_dropped_epochs', 'epoch_time_window', 'baseline_correction', 
+                    'total_epochs_nr', 'good_epoch_count', 'percentage_dropped_epochs_double_peaks_not_cleaned','percentage_dropped_epochs_double_peaks_cleaned', 
+                    'epoch_time_window', 'baseline_correction', 
                     'hep_time_window',  'channels', 'hep_max_amplitudes', 'hep_max_latencies', 'hep_min_amplitudes', 'hep_min_latencies',
                     'hep_mean_amplitudes', 'hep_amplitudes_sd', 'Fp2_mean_amplitude', 'F4_mean_amplitude', 'F8_mean_amplitude',
                     'Fp2_max_amplitude', 'F4_max_amplitude', 'F8_max_amplitude', 'Fp2_min_amplitude', 'F8_min_amplitude', 
@@ -234,7 +236,13 @@ def compute_heps(data_dir,
 
                 # drop bad epochs
                 heartbeat_epochs.drop_bad(reject=epoch_reject_criteria)
-                percentage_dropped_epochs = heartbeat_epochs.drop_log_stats()
+                #percentage_dropped_epochs = heartbeat_epochs.drop_log_stats()
+                n_dropped_bad_epochs = sum(1 if len(x) > 0 else 0 for x in heartbeat_epochs.drop_log)
+                #percentage_dropped_epochs = (n_dropped_bad_epochs / total_epochs_nr) * 100
+                percentage_dropped_epochs = ((total_epochs_nr - len(heartbeat_epochs)) / total_epochs_nr) * 100
+
+
+
                 
                 # plot epochs
                 # heartbeat_epochs.plot(events = heartbeat_events_v1, event_id=event_id_v1)
@@ -277,7 +285,12 @@ def compute_heps(data_dir,
 
                         # now drop bad epochs
                         heartbeat_epochs.drop_bad(reject=epoch_reject_criteria)
-                        percentage_dropped_epochs = heartbeat_epochs.drop_log_stats()
+                        n_dropped_bad_epochs = sum(1 if len(x) > 0 else 0 for x in heartbeat_epochs.drop_log)
+                        #percentage_dropped_epochs = heartbeat_epochs.drop_log_stats()
+                        #percentage_dropped_epochs = (n_dropped_bad_epochs / total_epochs_nr) * 100
+                        percentage_dropped_epochs = ((total_epochs_nr - len(heartbeat_epochs)) / total_epochs_nr) * 100
+
+
 
 
                     else:
@@ -300,10 +313,68 @@ def compute_heps(data_dir,
                     continue # Skip the rest of the loop and move to the next file
 
 
+
+
+
+
+                # Add exclusion criterion: if there are 2 peaks in a remaining good epoch (denoted by multiple triggers with an R-peak label),  exclude that epoch
+                # -----------------------------
+                # Step: Exclude epochs with double R-peaks
+                # -----------------------------
+
+                if double_rpeak_exclusion:
+
+                    print("\nChecking for epochs with multiple R-peaks...")
+                    # List to store indices of epochs with >1 R-peak
+                    double_rpeak_epochs = []
+
+                    sfreq = heartbeat_epochs.info['sfreq']
+                    heart_epoch_tmin
+
+                    # Epoch starts and ends in samples (adjust start by tmin)
+                    epoch_starts = heartbeat_epochs.events[:, 0] + int(heart_epoch_tmin * sfreq)
+                    epoch_ends   = epoch_starts + len(heartbeat_epochs.times)
+
+                    # All R-peak event samples
+                    rpeak_samples = heartbeat_events[:, 0]  # 1D array of sample indices
+
+                    # Boolean mask: True if epoch has multiple R-peaks
+                    extra_rpeak_mask = np.array([
+                        np.sum((rpeak_samples >= start) & (rpeak_samples < end)) > 1  # >1 means multiple R-peaks
+                        for start, end in zip(epoch_starts, epoch_ends)
+                    ])
+
+                    # Keep only epochs with 1 or 0 R-peaks
+                    clean_mask = ~extra_rpeak_mask
+                    heartbeat_epochs_clean = heartbeat_epochs[clean_mask]
+
+                    # how many double peak epochs were found?
+                    num_double_rpeak_epochs = np.sum(extra_rpeak_mask)
+
+                    # updated percentage dropped epochs
+                    percentage_dropped_epochs_including_double_peaks = ((total_epochs_nr - len(heartbeat_epochs_clean)) / total_epochs_nr) * 100
+
+
+                    print(f"Kept {len(heartbeat_epochs_clean)} / {len(heartbeat_epochs)} epochs")
+
+                else:
+                    percentage_dropped_epochs_including_double_peaks = percentage_dropped_epochs
+                    num_double_rpeak_epochs = 0
+                    heartbeat_epochs_clean = heartbeat_epochs
+                    
+
+
+
+
+
+
+
+
+                        
                 
                 # %% ### create evoked
                 
-                heartbeat_evoked = heartbeat_epochs.average()
+                heartbeat_evoked = heartbeat_epochs_clean.average()
 
                 # Append evoked data to appropriate list
                 if task == 'eyes-closed' and session == 'V1':
@@ -453,11 +524,13 @@ def compute_heps(data_dir,
                                     'event_times': heartbeat_events[:,0],
                                     'total_heart_events_nr': total_heart_events_nr,
                                     'total_epochs_nr': total_epochs_nr,
-                                    'good_epoch_count': len(heartbeat_epochs), 
-                                    'percentage_dropped_epochs': percentage_dropped_epochs, 
+                                    'good_epoch_count': len(heartbeat_epochs_clean), 
+                                    'percentage_dropped_epochs_double_peaks_not_cleaned': percentage_dropped_epochs, 
+                                    'percentage_dropped_epochs_double_peaks_cleaned': percentage_dropped_epochs_including_double_peaks,
                                     'threshold_percentage_bad_epochs': bad_epoch_threshold ,
                                     'channel_interpolated_due_too-many-bad-epochs': channel_interpolated_due_bad_epochs,
                                     'epoch_strategy': f'if > {bad_epoch_threshold}% bad epochs due to a single channel, interpolate that channel. If due to multiple channels, exclude the file',
+                                    'number_of_double_R-peak_epochs_excluded': num_double_rpeak_epochs,
                                     'epoch_time_window': epoch_time_window,
                                     'baseline_correction': baseline,
                                     'hep_time_window': time_window,
@@ -513,10 +586,11 @@ def compute_heps(data_dir,
                 processing_style_bad_epoch = f"{bad_epoch_threshold}%-bad-epochs-threshold"
                 processing_style_time_window = f"HEP-time_window-{time_window[0]:.2f}-{time_window[1]:.2f}"
                 processing_subfolder_name = f"HEPs_{processing_style_epoch}_{processing_style_baseline}_{processing_style_reject}_{processing_style_bad_epoch}_{processing_style_time_window}"
+                double_rpeak_exclusion_str = "with-double-R-peak-exclusion" if double_rpeak_exclusion else ""
 
                 # SAVE the Preprocessed Data & Prep Ouputs in a CSV
                 folder_name = 'HEPs' # this is the main folder where all the outputs will be saved"
-                output_folder_path = os.path.join(os.getcwd(), folder_name, processing_subfolder_name)
+                output_folder_path = os.path.join(os.getcwd(), folder_name, processing_subfolder_name, double_rpeak_exclusion_str)
                 print(f"Creating directory: {output_folder_path}")
                 os.makedirs(output_folder_path, exist_ok=True)
 
