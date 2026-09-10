@@ -81,7 +81,7 @@ def prep_until_ica(data_dir, behavioral_data_path, new_sampling_rate=250, low_fr
             logging.info("processing HC data") 
         elif sz_id in filename:
             is_sz = True
-            sessions= ['V1'] #sessions= ['V1', 'V3']
+            sessions= ['V1', 'V3'] #sessions= ['V1'] #
             #print("processing SZ data")
             logging.info("processing SZ data")
     if not is_hc and not is_sz:
@@ -230,6 +230,12 @@ def prep_until_ica(data_dir, behavioral_data_path, new_sampling_rate=250, low_fr
                         raw.crop(tmin=42)
                     elif filename == "BTSCZ026_V3_eyes-open.vhdr":
                         tmax = last_sec - 231
+                        raw.crop(tmax=tmax)
+                    elif filename == "BTSCZ080_V3_eyes-open.vhdr":
+                        tmax = last_sec - 5
+                        raw.crop(tmax=tmax)
+                    elif filename == "BTSCZ097_V1_eyes-open.vhdr":
+                        tmax = last_sec - 4
                         raw.crop(tmax=tmax)
                     elif filename == "BTSCZ043_V1_eyes-open.vhdr":
                         raw_part1 = raw.copy().crop(tmax=256)
